@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 0,
+  "id": "io.github.zhustya.c-cpp-compdb",
+  "displayName": "C/C++ Support (auto compilation database)",
+  "version": "0.1.0",
+  "pluginAPIVersion": 0,
+  "requires": {
+    "languages": 0,
+    "languageServers": 0
+  },
+  "vendor": {
+    "id": "io.github.zhustya",
+    "displayName": "zhustya",
+    "signatureRequirement": "none"
+  },
+  "permissions": [
+    "languageServer.launch",
+    "process.run"
+  ],
+  "activationEvents": [
+    "onLanguage:c",
+    "onLanguage:cpp"
+  ],
+  "languages": [
+    {
+      "id": "c",
+      "displayName": "C",
+      "fileExtensions": ["c", "h"],
+      "configuration": { "lineComment": "//", "blockComment": ["/*", "*/"] }
+    },
+    {
+      "id": "cpp",
+      "displayName": "C++",
+      "fileExtensions": ["cpp", "cc", "cxx", "c++", "hpp", "hh", "hxx", "h++"],
+      "configuration": { "lineComment": "//", "blockComment": ["/*", "*/"] }
+    }
+  ],
+  "languageServers": [
+    {
+      "languageID": "c",
+      "languageIdentifier": "c",
+      "launch": { "kind": "systemCommand", "commands": ["node"] },
+      "arguments": ["${pluginDir}/clangd-wrapper.mjs"],
+      "validationArguments": ["--version"]
+    },
+    {
+      "languageID": "cpp",
+      "languageIdentifier": "cpp",
+      "launch": { "kind": "systemCommand", "commands": ["node"] },
+      "arguments": ["${pluginDir}/clangd-wrapper.mjs"],
+      "validationArguments": ["--version"]
+    }
+  ]
+}
