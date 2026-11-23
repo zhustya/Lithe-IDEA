@@ -123,7 +123,9 @@ function canvasFor(s, width, query) {
     : s.commits;
   const { byHash, laneCount } = layout(list);
   const w = Math.max(Number(width) || 900, 640);
-  const height = Math.max(list.length * ROW + 8, 40);
+  const contentHeight = Math.max(list.length * ROW + 8, 40);
+  // Core caps a canvas widget at 2000 points; a taller scene uses panning.
+  const height = Math.min(contentHeight, 2000);
   const refsStart = laneCount * LANE + 20;
   const nodes = [];
 
@@ -173,7 +175,13 @@ function canvasFor(s, width, query) {
     });
   }
 
-  return { type: 'canvas', id: 'graph', label: 'Commit graph', height: height, viewBox: [0, 0, w, height], nodes };
+  return {
+    type: 'canvas', id: 'graph', label: 'Commit graph', height: height,
+    viewBox: [0, 0, w, contentHeight],
+    ...(contentHeight > height ? { pan: true } : {}),
+    on: ['resize'],
+    nodes,
+  };
 }
 
 function viewFor(s, event) {
