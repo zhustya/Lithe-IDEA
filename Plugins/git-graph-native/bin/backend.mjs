@@ -67,7 +67,9 @@ function parseRefs(decoration) {
 async function readLog(repo, limit) {
   const count = Math.min(Math.max(Number(limit) || 200, 1), 1000);
   const format = ['%H', '%P', '%an', '%aI', '%s', '%D'].join(FIELD) + RECORD;
-  const text = await runGit(repo, ['log', `--max-count=${count}`, `--pretty=format:${format}`, '--no-color']);
+  // --all includes commits from every branch/tag, not just HEAD's ancestry;
+  // --topo-order keeps children next to their parents for clean lanes.
+  const text = await runGit(repo, ['log', '--all', '--topo-order', `--max-count=${count}`, `--pretty=format:${format}`, '--no-color']);
   const commits = [];
   for (const chunk of text.split(RECORD)) {
     const f = chunk.trim().split(FIELD);
@@ -164,10 +166,18 @@ function canvasesFor(s, width, query) {
       const commit = chunk[i];
       const x = commit.lane * LANE + LANE / 2 + 8;
       const children = [];
-      if (commit.hash === s.selected) {
-        children.push({ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$selection' });
+      const selected = commit.hash === s.selected;
+      if (selected) {
+        children.push({ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$hover', opacity: 0.45 });
       }
-      children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 5, fill: COLORS[commit.lane % COLORS.length], stroke: commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined, width: 2 });
+      if (selected) {
+        // Git Graph marks the selected commit with a hollow square.
+        children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 1,
+          fill: '$background', stroke: '$accent', width: 2 });
+      } else {
+        children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 5,
+          fill: COLORS[commit.lane % COLORS.length], stroke: commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined, width: 2 });
+      }
 
       let refX = refsStart;
       for (const ref of commit.refs) {
