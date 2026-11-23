@@ -102,11 +102,16 @@ function layout(list) {
     if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) lane = lanes.length; }
     commit.lane = lane;
     lanes[lane] = null;
-    commit.parents.forEach((parent, index) => {
-      if (lanes.includes(parent)) return;
+    // A parent already tracked in another lane must not be registered twice:
+    // a duplicate makes the stale lane keep the same hash forever, so later
+    // commits are assigned to the wrong lane and their edges/dots look broken.
+    const first = commit.parents[0];
+    if (first && !lanes.includes(first)) lanes[lane] = first;
+    for (const parent of commit.parents.slice(1)) {
+      if (lanes.includes(parent)) continue;
       const free = lanes.indexOf(null);
-      lanes[index === 0 ? lane : (free < 0 ? lanes.length : free)] = parent;
-    });
+      lanes[free < 0 ? lanes.length : free] = parent;
+    }
   }
   return { byHash, laneCount: Math.max(lanes.length, 1) };
 }
@@ -152,8 +157,8 @@ function canvasesFor(s, width, query) {
           d = `M ${x} ${y} L ${x} ${py}`;
         } else {
           const dir = px > x ? 1 : -1;
-          const bend = Math.min(10, Math.abs(px - x));
-          d = `M ${x} ${y} L ${x} ${y + 6} Q ${x} ${y + 14} ${x + dir * bend} ${y + 14} L ${px} ${y + 14} L ${px} ${py}`;
+          const bend = Math.min(6, Math.abs(px - x));
+          d = `M ${x} ${y} L ${x} ${y + 5} Q ${x} ${y + 11} ${x + dir * bend} ${y + 11} L ${px} ${y + 11} L ${px} ${py}`;
         }
         nodes.push({
           type: 'path', d: d,
