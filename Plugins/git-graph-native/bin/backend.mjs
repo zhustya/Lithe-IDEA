@@ -119,7 +119,7 @@ function layout(list) {
 const states = new Map();
 function stateOf(event) {
   if (!states.has(event.instance)) {
-    states.set(event.instance, { repo: '', limit: '200', search: '', selected: '', repos: [], commits: [], detail: null });
+    states.set(event.instance, { repo: '', limit: '1000', search: '', selected: '', repos: [], commits: [], detail: null });
   }
   return states.get(event.instance);
 }
@@ -225,7 +225,7 @@ function viewFor(s, event) {
       options: s.repos.map((r) => ({ value: r.id, label: r.name })),
     },
     { type: 'button', id: 'refresh', text: 'Refresh' },
-    { type: 'select', id: 'limit', label: 'Count', value: s.limit, options: ['100', '200', '500', '1000'].map((v) => ({ value: v, label: v })) },
+    { type: 'select', id: 'limit', label: 'Count', value: s.limit, options: ['200', '500', '1000'].map((v) => ({ value: v, label: v })) },
     { type: 'textField', id: 'search', label: 'Search', value: s.search, placeholder: 'subject / author / hash', width: 'fill' },
   ];
   const nodes = [{ type: 'row', children: controls }];
@@ -270,7 +270,7 @@ backend.view('graph.draw', async (event) => {
   if (event.event === 'open') return refresh(s, event);
   if (event.event === 'change') {
     if (event.node === 'repo') s.repo = String(event.value || '');
-    else if (event.node === 'limit') s.limit = String(event.value || '200');
+    else if (event.node === 'limit') s.limit = String(event.value || '1000');
     else if (event.node === 'search') s.search = String(event.value || '');
     else return {};
     if (event.node !== 'search') return refresh(s, event);
