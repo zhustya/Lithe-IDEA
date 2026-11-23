@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.zhustya.git-graph-lite",
   "displayName": "Git Graph Lite (read-only)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "pluginAPIVersion": 0,
   "requires": {
     "backend": 0,

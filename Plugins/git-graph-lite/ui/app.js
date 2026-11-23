@@ -3,6 +3,8 @@
 (function () {
   'use strict';
 
+  ensureBridge();
+
   const SVG = 'http://www.w3.org/2000/svg';
   const ROW = 26;
   const LANE = 18;
@@ -31,26 +33,73 @@
   // The host injects its bridge script before page scripts, but the underlying
   // channel can become available slightly later in some web views. Wait briefly
   // instead of failing with "Cannot read properties of undefined".
-  let bridgeReloaded = false;
-  function waitForBridge(timeout) {
-    const limit = timeout || 8000;
-    return new Promise((resolve, reject) => {
-      const started = Date.now();
-      const check = () => {
-        if (window.lithe && typeof window.lithe.request === 'function') return resolve();
-        // The injected bootstrap returns early when window.viva is not ready yet.
-        // Retry it once from the host-served path after the channel has settled.
-        if (!bridgeReloaded && Date.now() - started > 300) {
-          bridgeReloaded = true;
-          const script = document.createElement('script');
-          script.src = '/.lithe-host/bridge.js';
-          document.head.appendChild(script);
+  // Some web views do not run the injected bridge scripts in time (or at all).
+  // Fall back to the same protocol over Viva's native WebView channel, and even
+  // recreate that channel from window.chrome.webview / window.webkit if needed.
+  function ensureChannel() {
+    if (window.viva && typeof window.viva.postMessage === 'function') return window.viva;
+    const send = (text) => {
+      if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(String(text));
+      else if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.viva)
+        window.webkit.messageHandlers.viva.postMessage(String(text));
+    };
+    const channel = {
+      onmessage: null,
+      postMessage: send,
+      deliver(text) { if (typeof this.onmessage === 'function') this.onmessage({ data: text }); },
+    };
+    Object.defineProperty(window, 'viva', { value: channel });
+    return channel;
+  }
+
+  function ensureBridge() {
+    if (window.lithe && typeof window.lithe.request === 'function') return;
+    const channel = ensureChannel();
+    let next = 0;
+    const pending = new Map();
+    const listeners = new Map();
+    Object.defineProperty(channel, 'onmessage', {
+      value: (message) => {
+        let value;
+        try { value = JSON.parse(message.data); } catch { return; }
+        if (typeof value.id === 'number' && pending.has(value.id)) {
+          const waiting = pending.get(value.id);
+          pending.delete(value.id);
+          if (value.error) waiting.reject(value.error);
+          else waiting.resolve(value.ok);
+        } else if (typeof value.event === 'string') {
+          for (const listener of [...(listeners.get(value.event) || [])]) {
+            try { listener(value.payload); } catch { /* ignore listener errors */ }
+          }
         }
-        if (Date.now() - started >= limit) return reject(new Error('Lithe bridge is unavailable in this page.'));
-        setTimeout(check, 50);
-      };
-      check();
+      },
     });
+    const lithe = {
+      version: 0,
+      context: { pluginID: '', windowID: '', platform: '', locale: '' },
+      request(method, params) {
+        const id = ++next;
+        return new Promise((resolve, reject) => {
+          pending.set(id, { resolve, reject });
+          channel.postMessage(JSON.stringify({ id, method: String(method), params: params === undefined ? null : params }));
+        });
+      },
+      on(event, listener) {
+        if (!listeners.has(event)) listeners.set(event, new Set());
+        listeners.get(event).add(listener);
+        return () => listeners.get(event)?.delete(listener);
+      },
+    };
+    Object.defineProperty(window, 'lithe', { value: lithe, enumerable: true });
+  }
+
+  async function waitForBridge(timeout) {
+    const limit = timeout || 4000;
+    const started = Date.now();
+    while (!(window.lithe && typeof window.lithe.request === 'function')) {
+      if (Date.now() - started >= limit) throw new Error('Lithe bridge is unavailable in this page.');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
   }
 
   async function call(fn, params) {
