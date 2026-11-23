@@ -6,7 +6,6 @@
   "pluginAPIVersion": 0,
   "requires": {
     "backend": 0,
-    "pluginFunctions": 0,
     "ui": 0
   },
   "requiresTools": ["node"],
