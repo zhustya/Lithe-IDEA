@@ -8,7 +8,7 @@ import { createBackend, PluginError } from '../vendor/lithe-plugin-sdk/src/index
 const FIELD = '\x1f';
 const RECORD = '\x1e';
 const ROW = 26;
-const LANE = 18;
+const LANE = 14;
 const COLORS = ['#e06060', '#60a0e0', '#60c090', '#c090e0', '#e0b040', '#40b0c0', '#d070a0', '#90a0b0'];
 
 function runGit(repo, args) {
@@ -124,7 +124,7 @@ function canvasesFor(s, width, query) {
     : s.commits;
   const { laneCount } = layout(list);
   const w = Math.max(Number(width) || 900, 640);
-  const refsStart = laneCount * LANE + 20;
+  const refsStart = laneCount * LANE + 12;
   const scenes = [];
 
   for (let start = 0; start < list.length; start += CHUNK) {
@@ -142,9 +142,18 @@ function canvasesFor(s, width, query) {
         if (pi === undefined) continue;
         const px = chunk[pi].lane * LANE + LANE / 2 + 8;
         const py = pi * ROW + ROW / 2;
+        // Git Graph style: a straight vertical trunk and a short bend only
+        // where the branch joins its parent, instead of a large S-curve.
+        let d;
+        if (px === x) {
+          d = `M ${x} ${y} L ${x} ${py}`;
+        } else {
+          const dir = px > x ? 1 : -1;
+          const bend = Math.min(9, Math.abs(px - x));
+          d = `M ${x} ${y} L ${x} ${py - 9} Q ${x} ${py} ${x + dir * bend} ${py} L ${px} ${py}`;
+        }
         nodes.push({
-          type: 'path',
-          d: `M ${x} ${y} C ${x} ${(y + py) / 2}, ${px} ${(y + py) / 2}, ${px} ${py}`,
+          type: 'path', d: d,
           stroke: COLORS[commit.lane % COLORS.length], width: 2,
         });
       }
