@@ -2,7 +2,7 @@
   "schemaVersion": 0,
   "id": "io.github.zhustya.git-graph-native",
   "displayName": "Git Graph (Native View)",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "pluginAPIVersion": 0,
   "requires": {
     "backend": 0,

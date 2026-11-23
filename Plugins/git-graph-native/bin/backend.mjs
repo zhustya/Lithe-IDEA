@@ -152,9 +152,18 @@ function canvasesFor(s, width) {
         if (pi === undefined) continue;
         const px = chunk[pi].lane * LANE + LANE / 2 + 8;
         const py = pi * ROW + ROW / 2;
+        // Vertical trunk with a short bend at the child (merge) row.
+        let d;
+        if (px === x) {
+          d = `M ${x} ${y} L ${px} ${py}`;
+        } else {
+          const dir = px > x ? 1 : -1;
+          const bend = Math.min(6, Math.abs(px - x));
+          d = `M ${x} ${y} L ${x} ${y + 5} Q ${x} ${y + 11} ${x + dir * bend} ${y + 11} L ${px} ${y + 11} L ${px} ${py}`;
+        }
         nodes.push({
-          type: 'path', d: `M ${x} ${y} L ${px} ${py}`,
-          stroke: COLORS[chunk[pi].lane % COLORS.length],
+          type: 'path', d: d,
+          stroke: COLORS[chunk[pi].lane % COLORS.length], width: 2,
         });
       }
     }
@@ -187,21 +196,28 @@ function canvasesFor(s, width) {
       const x = commit.lane * LANE + LANE / 2 + 8;
       const selected = commit.hash === s.selected;
       const dot = {
-        type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10,
+        type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: selected ? 1 : 5,
         fill: selected ? '$background' : COLORS[commit.lane % COLORS.length],
         stroke: selected || commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined,
+        width: 2,
       };
-      const runs = [];
+      const rowChildren = [dot];
+      let refX = refsStart;
       for (const ref of commit.refs.slice(0, 2)) {
-        const label = ref.name.length > 16 ? ref.name.slice(0, 15) + '…' : ref.name;
+        const label = ref.name.length > 18 ? ref.name.slice(0, 17) + '…' : ref.name;
+        const badgeW = label.length * 6.5 + 12;
         const fill = ref.kind === 'head' ? '$error' : ref.kind === 'tag' ? '$warning' : ref.kind === 'remote' ? '#6b46c1' : '$accent';
-        runs.push({ text: label + ' ', color: fill });
+        rowChildren.push({ type: 'rect', x: refX, y: 6, w: badgeW, h: 14, radius: 7, fill: fill });
+        rowChildren.push({ type: 'text', x: refX + 6, y: 17, style: 'caption', text: label, color: '#ffffff' });
+        refX += badgeW + 6;
       }
-      runs.push({ text: commit.subject.slice(0, 36) });
+      const textX = Math.max(refX, refsStart) + 8;
+      rowChildren.push({ type: 'text', x: textX, y: 17, style: 'body', text: commit.subject.slice(0, 60), maxWidth: Math.max(w - textX - 220, 120) });
+      rowChildren.push({ type: 'text', x: w - 100, y: 17, style: 'caption', text: commit.author.slice(0, 14), color: '$textSecondary', align: 'end' });
+      rowChildren.push({ type: 'text', x: w - 8, y: 17, style: 'caption', text: commit.date.slice(0, 10), color: '$textMuted', align: 'end' });
       const children = selected
-        ? [{ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$hover', opacity: 0.45 }, dot,
-           { type: 'text', x: refsStart, y: 17, runs: runs }]
-        : [dot, { type: 'text', x: refsStart, y: 17, runs: runs }];
+        ? [{ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$hover', opacity: 0.45 }, ...rowChildren]
+        : rowChildren;
       nodes.push({
         type: 'group', id: 'commit-' + commit.hash.slice(0, 10), x: 0, y: i * ROW, w: w, h: ROW,
         label: commit.hash.slice(0, 10), on: ['click'], children: children,
