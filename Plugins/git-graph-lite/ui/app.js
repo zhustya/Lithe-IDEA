@@ -46,13 +46,17 @@
     }
   }
 
+  let themeSource = 'os-preference';
   async function loadInjectedTheme() {
     try {
       const response = await fetch('/.lithe-host/bridge.js');
       if (!response.ok) return;
       const text = await response.text();
       const match = text.match(/let\s+theme\s*=\s*(\{[\s\S]*?\});\s*let\s+next/);
-      if (match) applyTheme(JSON.parse(match[1]));
+      if (match) {
+        applyTheme(JSON.parse(match[1]));
+        themeSource = 'lithe-bridge';
+      }
     } catch { /* keep the CSS fallbacks when the bridge file is unavailable */ }
   }
 
@@ -91,7 +95,10 @@
           if (value.error) waiting.reject(value.error);
           else waiting.resolve(value.ok);
         } else if (typeof value.event === 'string') {
-          if (value.event === 'ui.themeChanged') applyTheme(value.payload);
+          if (value.event === 'ui.themeChanged') {
+            applyTheme(value.payload);
+            themeSource = 'theme-event';
+          }
           for (const listener of [...(listeners.get(value.event) || [])]) {
             try { listener(value.payload); } catch { /* ignore listener errors */ }
           }
@@ -298,7 +305,7 @@
       const answer = await call('graph.log', { repo: repo.path, limit: Number(el.limit.value) });
       commits = answer.commits || [];
       filterAndRender();
-      status(`${commits.length} commits · ${repo.name}`);
+      status(`${commits.length} commits · ${repo.name} · theme:${themeSource}`);
     } catch (err) {
       status(err.message || String(err));
     }

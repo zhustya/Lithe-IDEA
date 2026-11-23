@@ -1,25 +1,53 @@
-/* All colors come from the variables Lithe injects into plugin pages. */
-:root { color-scheme: light dark; }
+/* Prefer the variables Lithe injects; otherwise follow the OS light/dark
+   preference so the panel matches the IDE in the common case. */
+:root {
+  color-scheme: light dark;
+  --gg-bg: var(--lithe-background, #1e1e1e);
+  --gg-surface: var(--lithe-surface, #252526);
+  --gg-header: var(--lithe-header, var(--lithe-background, #1e1e1e));
+  --gg-fg: var(--lithe-foreground, #d4d4d4);
+  --gg-muted: var(--lithe-secondary-foreground, #8a8a8a);
+  --gg-border: var(--lithe-border, #3a3a3a);
+  --gg-accent: var(--lithe-accent, #4a6fa5);
+  --gg-link: var(--lithe-link, var(--lithe-accent, #4a6fa5));
+  --gg-warning: var(--lithe-warning, #e2b100);
+  --gg-error: var(--lithe-error, #d32f2f);
+  --gg-font: var(--lithe-font-family, system-ui, sans-serif);
+  --gg-font-size: var(--lithe-font-size, 13px);
+  --gg-code-font: var(--lithe-code-font-family, monospace);
+  --gg-code-size: var(--lithe-code-font-size, 13px);
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --gg-bg: var(--lithe-background, #ffffff);
+    --gg-surface: var(--lithe-surface, #f3f3f3);
+    --gg-header: var(--lithe-header, var(--lithe-background, #f3f3f3));
+    --gg-fg: var(--lithe-foreground, #1f1f1f);
+    --gg-muted: var(--lithe-secondary-foreground, #616161);
+    --gg-border: var(--lithe-border, #d4d4d4);
+    --gg-accent: var(--lithe-accent, #2b6cb0);
+  }
+}
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
   margin: 0;
-  font-family: var(--lithe-font-family, system-ui, sans-serif);
-  font-size: var(--lithe-font-size, 13px);
-  color: var(--lithe-foreground, #d4d4d4);
-  background: var(--lithe-background, #1e1e1e);
+  font-family: var(--gg-font);
+  font-size: var(--gg-font-size);
+  color: var(--gg-fg);
+  background: var(--gg-bg);
 }
 .toolbar {
   display: flex;
   gap: 6px;
   padding: 6px;
-  background: var(--lithe-header, var(--lithe-background));
-  border-bottom: 1px solid var(--lithe-border, #333);
+  background: var(--gg-header);
+  border-bottom: 1px solid var(--gg-border);
 }
 .toolbar select, .toolbar input, .toolbar button {
-  background: var(--lithe-surface, var(--lithe-background));
-  color: var(--lithe-foreground, inherit);
-  border: 1px solid var(--lithe-border, #444);
+  background: var(--gg-surface);
+  color: var(--gg-fg);
+  border: 1px solid var(--gg-border);
   border-radius: 3px;
   padding: 3px 6px;
   font: inherit;
@@ -27,53 +55,29 @@ body {
 .toolbar select#repo { flex: 1; min-width: 0; }
 .toolbar input { flex: 1; min-width: 80px; }
 .toolbar button { cursor: pointer; min-width: 26px; }
-.toolbar button:hover { background: var(--lithe-accent, #4a6fa5); }
-.status {
-  padding: 3px 8px;
-  color: var(--lithe-secondary-foreground, #888);
-  background: var(--lithe-background, transparent);
-  min-height: 20px;
-}
+.toolbar button:hover { background: var(--gg-accent); color: #fff; }
+.status { padding: 3px 8px; color: var(--gg-muted); background: var(--gg-bg); min-height: 20px; }
 .content { display: flex; flex-direction: column; height: calc(100% - 64px); }
-.graph-scroll { flex: 1; overflow: auto; background: var(--lithe-background, transparent); }
+.graph-scroll { flex: 1; overflow: auto; background: var(--gg-bg); }
 .graph { position: relative; min-width: 100%; }
 .lanes { position: relative; flex: 0 0 auto; display: block; }
-.row {
-  display: flex;
-  align-items: center;
-  height: 26px;
-  white-space: nowrap;
-  cursor: pointer;
-  border-bottom: 1px solid transparent;
-}
-.row:hover {
-  background: var(--lithe-surface, rgba(255,255,255,.06));
-  border-bottom-color: var(--lithe-border, transparent);
-}
-.row.selected {
-  background: var(--lithe-surface, rgba(80,120,200,.2));
-  background: color-mix(in srgb, var(--lithe-accent, #4a6fa5) 22%, transparent);
-}
+.row { display: flex; align-items: center; height: 26px; white-space: nowrap; cursor: pointer; border-bottom: 1px solid transparent; }
+.row:hover { background: var(--gg-surface); border-bottom-color: var(--gg-border); }
+.row.selected { background: color-mix(in srgb, var(--gg-accent) 22%, transparent); background: var(--gg-surface); }
 .refs { flex: 0 0 auto; display: flex; gap: 4px; margin-right: 6px; }
 .ref { border-radius: 8px; padding: 1px 6px; font-size: 11px; border: 1px solid transparent; }
-.ref.head { color: var(--lithe-background); background: var(--lithe-error, #d32f2f); }
+.ref.head { color: #fff; background: var(--gg-error); }
 .ref.branch { color: #fff; background: #2b6cb0; }
 .ref.remote { color: #fff; background: #6b46c1; }
-.ref.tag { color: #1e1e1e; background: var(--lithe-warning, #e2b100); }
+.ref.tag { color: #1e1e1e; background: var(--gg-warning); }
 .subject { overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
-.author { color: var(--lithe-secondary-foreground, #888); margin-left: auto; padding: 0 8px; }
-.date { color: var(--lithe-secondary-foreground, #888); padding-right: 8px; }
-.detail {
-  border-top: 1px solid var(--lithe-border, #333);
-  padding: 8px;
-  max-height: 38vh;
-  overflow: auto;
-  background: var(--lithe-surface, var(--lithe-background));
-}
-.detail-head { color: var(--lithe-secondary-foreground, #888); margin-bottom: 6px; }
-.detail-message { white-space: pre-wrap; margin-bottom: 8px; color: var(--lithe-foreground); }
-.detail-files { font-family: var(--lithe-code-font-family, monospace); font-size: var(--lithe-code-font-size, 13px); }
+.author { color: var(--gg-muted); margin-left: auto; padding: 0 8px; }
+.date { color: var(--gg-muted); padding-right: 8px; }
+.detail { border-top: 1px solid var(--gg-border); padding: 8px; max-height: 38vh; overflow: auto; background: var(--gg-surface); }
+.detail-head { color: var(--gg-muted); margin-bottom: 6px; }
+.detail-message { white-space: pre-wrap; margin-bottom: 8px; color: var(--gg-fg); }
+.detail-files { font-family: var(--gg-code-font); font-size: var(--gg-code-size); }
 .file { display: flex; gap: 8px; padding: 1px 0; cursor: pointer; }
-.file:hover { color: var(--lithe-link, var(--lithe-accent)); text-decoration: underline; }
-.file .st { width: 12px; color: var(--lithe-warning, #e2b100); }
-.hint { padding: 12px; color: var(--lithe-secondary-foreground, #888); }
+.file:hover { color: var(--gg-link); text-decoration: underline; }
+.file .st { width: 12px; color: var(--gg-warning); }
+.hint { padding: 12px; color: var(--gg-muted); }
