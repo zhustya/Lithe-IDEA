@@ -168,7 +168,7 @@ function canvasFor(s, width, query) {
     children.push({ type: 'text', x: w - 8, y: 17, style: 'caption', text: commit.date.slice(0, 10), color: '$textMuted', align: 'end' });
 
     nodes.push({
-      type: 'group', id: 'commit:' + commit.hash.slice(0, 12), x: 0, y: i * ROW, w, h: ROW,
+      type: 'group', id: 'commit-' + commit.hash.slice(0, 12), x: 0, y: i * ROW, w, h: ROW,
       label: commit.subject, on: ['click'], children,
     });
   }
@@ -237,7 +237,7 @@ backend.view('graph.draw', async (event) => {
   }
   if (event.event === 'click') {
     if (event.node === 'refresh') return refresh(s, event);
-    if (event.canvas === 'graph' && String(event.node || '').startsWith('commit:')) {
+    if (event.canvas === 'graph' && String(event.node || '').startsWith('commit-')) {
       const prefix = event.node.slice(7);
       const commit = s.commits.find((c) => c.hash.startsWith(prefix));
       if (!commit) return {};
