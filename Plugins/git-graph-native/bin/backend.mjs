@@ -129,7 +129,8 @@ function canvasesFor(s, width, query) {
   const list = query
     ? s.commits.filter((c) => c.subject.toLowerCase().includes(query) || c.author.toLowerCase().includes(query) || c.hash.includes(query))
     : s.commits;
-  const { laneCount } = layout(list);
+  const { byHash: globalByHash, laneCount } = layout(list);
+  const globalIndex = new Map(list.map((c, i) => [c.hash, i]));
   const w = Math.max(Number(width) || 900, 640);
   const refsStart = laneCount * LANE + 12;
   const scenes = [];
@@ -164,6 +165,32 @@ function canvasesFor(s, width, query) {
           type: 'path', d: d,
           stroke: COLORS[chunk[pi].lane % COLORS.length], width: 2,
         });
+      }
+    }
+
+    // Bridge scene boundaries: a parent in the previous/next chunk has no
+    // local row, so draw a short continuation stub at the top/bottom edge.
+    for (let i = 0; i < chunk.length; i++) {
+      const commit = chunk[i];
+      const x = commit.lane * LANE + LANE / 2 + 8;
+      const y = i * ROW + ROW / 2;
+      for (const parentHash of commit.parents) {
+        const gi = globalIndex.get(parentHash);
+        if (gi === undefined || (gi >= start && gi < start + chunk.length)) continue;
+        const parent = globalByHash.get(parentHash);
+        if (!parent) continue;
+        const px = parent.lane * LANE + LANE / 2 + 8;
+        const color = COLORS[parent.lane % COLORS.length];
+        if (gi < start) {
+          // Parent was in the previous scene: line enters from the top.
+          nodes.push({ type: 'path', d: `M ${px} 0 L ${px} ${y} L ${x} ${y}`, stroke: color, width: 2 });
+        } else {
+          // Parent is in the next scene: line leaves through the bottom.
+          const d = px === x
+            ? `M ${x} ${y} L ${x} ${contentHeight}`
+            : `M ${x} ${y} L ${x} ${contentHeight - 4} L ${px} ${contentHeight - 4} L ${px} ${contentHeight}`;
+          nodes.push({ type: 'path', d: d, stroke: color, width: 2 });
+        }
       }
     }
 
