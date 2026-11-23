@@ -1,16 +1,24 @@
+/* All colors come from the variables Lithe injects into plugin pages. */
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
+html, body { height: 100%; }
 body {
   margin: 0;
   font-family: var(--lithe-font-family, system-ui, sans-serif);
-  font-size: 12px;
-  color: var(--lithe-fg, #d4d4d4);
-  background: var(--lithe-bg, #1e1e1e);
+  font-size: var(--lithe-font-size, 13px);
+  color: var(--lithe-foreground, #d4d4d4);
+  background: var(--lithe-background, #1e1e1e);
 }
-.toolbar { display: flex; gap: 6px; padding: 6px; border-bottom: 1px solid var(--lithe-border, #333); }
+.toolbar {
+  display: flex;
+  gap: 6px;
+  padding: 6px;
+  background: var(--lithe-header, var(--lithe-background));
+  border-bottom: 1px solid var(--lithe-border, #333);
+}
 .toolbar select, .toolbar input, .toolbar button {
-  background: var(--lithe-input-bg, #2b2b2b);
-  color: inherit;
+  background: var(--lithe-surface, var(--lithe-background));
+  color: var(--lithe-foreground, inherit);
   border: 1px solid var(--lithe-border, #444);
   border-radius: 3px;
   padding: 3px 6px;
@@ -19,28 +27,53 @@ body {
 .toolbar select#repo { flex: 1; min-width: 0; }
 .toolbar input { flex: 1; min-width: 80px; }
 .toolbar button { cursor: pointer; min-width: 26px; }
-.status { padding: 3px 8px; color: var(--lithe-muted, #888); min-height: 20px; }
-.content { display: flex; flex-direction: column; height: calc(100vh - 66px); }
-.graph-scroll { flex: 1; overflow: auto; }
+.toolbar button:hover { background: var(--lithe-accent, #4a6fa5); }
+.status {
+  padding: 3px 8px;
+  color: var(--lithe-secondary-foreground, #888);
+  background: var(--lithe-background, transparent);
+  min-height: 20px;
+}
+.content { display: flex; flex-direction: column; height: calc(100% - 64px); }
+.graph-scroll { flex: 1; overflow: auto; background: var(--lithe-background, transparent); }
 .graph { position: relative; min-width: 100%; }
-.row { display: flex; align-items: center; height: 26px; white-space: nowrap; cursor: pointer; }
-.row:hover { background: var(--lithe-hover, rgba(255,255,255,.06)); }
-.row.selected { background: var(--lithe-selected, rgba(80,120,200,.2)); }
 .lanes { position: relative; flex: 0 0 auto; display: block; }
+.row {
+  display: flex;
+  align-items: center;
+  height: 26px;
+  white-space: nowrap;
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+.row:hover {
+  background: var(--lithe-surface, rgba(255,255,255,.06));
+  border-bottom-color: var(--lithe-border, transparent);
+}
+.row.selected {
+  background: var(--lithe-surface, rgba(80,120,200,.2));
+  background: color-mix(in srgb, var(--lithe-accent, #4a6fa5) 22%, transparent);
+}
 .refs { flex: 0 0 auto; display: flex; gap: 4px; margin-right: 6px; }
-.ref { border-radius: 8px; padding: 1px 6px; font-size: 10px; border: 1px solid transparent; }
-.ref.head { color: #fff; background: #2d7d46; }
+.ref { border-radius: 8px; padding: 1px 6px; font-size: 11px; border: 1px solid transparent; }
+.ref.head { color: var(--lithe-background); background: var(--lithe-error, #d32f2f); }
 .ref.branch { color: #fff; background: #2b6cb0; }
 .ref.remote { color: #fff; background: #6b46c1; }
-.ref.tag { color: #222; background: #e2b100; }
+.ref.tag { color: #1e1e1e; background: var(--lithe-warning, #e2b100); }
 .subject { overflow: hidden; text-overflow: ellipsis; max-width: 60vw; }
-.author { color: var(--lithe-muted, #888); margin-left: auto; padding: 0 8px; }
-.date { color: var(--lithe-muted, #888); padding-right: 8px; }
-.detail { border-top: 1px solid var(--lithe-border, #333); padding: 8px; max-height: 38vh; overflow: auto; }
-.detail-head { color: var(--lithe-muted, #888); margin-bottom: 6px; }
-.detail-message { white-space: pre-wrap; margin-bottom: 8px; }
-.detail-files { font-family: var(--lithe-mono-font, monospace); }
+.author { color: var(--lithe-secondary-foreground, #888); margin-left: auto; padding: 0 8px; }
+.date { color: var(--lithe-secondary-foreground, #888); padding-right: 8px; }
+.detail {
+  border-top: 1px solid var(--lithe-border, #333);
+  padding: 8px;
+  max-height: 38vh;
+  overflow: auto;
+  background: var(--lithe-surface, var(--lithe-background));
+}
+.detail-head { color: var(--lithe-secondary-foreground, #888); margin-bottom: 6px; }
+.detail-message { white-space: pre-wrap; margin-bottom: 8px; color: var(--lithe-foreground); }
+.detail-files { font-family: var(--lithe-code-font-family, monospace); font-size: var(--lithe-code-font-size, 13px); }
 .file { display: flex; gap: 8px; padding: 1px 0; cursor: pointer; }
-.file:hover { text-decoration: underline; }
-.file .st { width: 12px; color: #e2b100; }
-.hint { padding: 12px; color: var(--lithe-muted, #888); }
+.file:hover { color: var(--lithe-link, var(--lithe-accent)); text-decoration: underline; }
+.file .st { width: 12px; color: var(--lithe-warning, #e2b100); }
+.hint { padding: 12px; color: var(--lithe-secondary-foreground, #888); }
