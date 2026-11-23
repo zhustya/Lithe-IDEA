@@ -33,6 +33,29 @@
   // The host injects its bridge script before page scripts, but the underlying
   // channel can become available slightly later in some web views. Wait briefly
   // instead of failing with "Cannot read properties of undefined".
+  // The host's bridge script is also what applies --lithe-* CSS variables.
+  // If it did not run, our fallback has to apply the theme itself.
+  function applyTheme(theme) {
+    if (!theme || typeof theme !== 'object') return;
+    const root = document.documentElement;
+    if (!root) return;
+    if (typeof theme.theme === 'string') root.setAttribute('data-theme', theme.theme);
+    const variables = theme.variables || {};
+    for (const name of Object.keys(variables)) {
+      if (name.startsWith('--lithe-')) root.style.setProperty(name, String(variables[name]));
+    }
+  }
+
+  async function loadInjectedTheme() {
+    try {
+      const response = await fetch('/.lithe-host/bridge.js');
+      if (!response.ok) return;
+      const text = await response.text();
+      const match = text.match(/let\s+theme\s*=\s*(\{[\s\S]*?\});\s*let\s+next/);
+      if (match) applyTheme(JSON.parse(match[1]));
+    } catch { /* keep the CSS fallbacks when the bridge file is unavailable */ }
+  }
+
   // Some web views do not run the injected bridge scripts in time (or at all).
   // Fall back to the same protocol over Viva's native WebView channel, and even
   // recreate that channel from window.chrome.webview / window.webkit if needed.
@@ -68,6 +91,7 @@
           if (value.error) waiting.reject(value.error);
           else waiting.resolve(value.ok);
         } else if (typeof value.event === 'string') {
+          if (value.event === 'ui.themeChanged') applyTheme(value.payload);
           for (const listener of [...(listeners.get(value.event) || [])]) {
             try { listener(value.payload); } catch { /* ignore listener errors */ }
           }
@@ -320,6 +344,7 @@
   }
 
   (async function start() {
+    await loadInjectedTheme();
     try {
       await waitForBridge();
       const saved = await window.lithe.request('ui.getState', {});
