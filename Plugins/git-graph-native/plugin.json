@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 0,
+  "id": "io.github.zhustya.git-graph-native",
+  "displayName": "Git Graph (Native View)",
+  "version": "0.1.0",
+  "pluginAPIVersion": 0,
+  "requires": {
+    "backend": 0,
+    "ui": 0
+  },
+  "vendor": {
+    "id": "io.github.zhustya",
+    "displayName": "zhustya",
+    "signatureRequirement": "none"
+  },
+  "permissions": [
+    "backend.launch",
+    "workspace.metadata",
+    "process.run",
+    "ui.contribute"
+  ],
+  "activationEvents": [
+    "onView:io.github.zhustya.git-graph-native.window"
+  ],
+  "languages": [],
+  "ui": {
+    "toolWindows": [
+      {
+        "id": "io.github.zhustya.git-graph-native.window",
+        "title": "Git Graph (Native)",
+        "placement": "right",
+        "order": 321,
+        "view": { "function": "graph.draw" },
+        "icon": { "host": "plugin" }
+      }
+    ]
+  },
+  "backend": {
+    "launch": {
+      "kind": "systemCommand",
+      "commands": ["node"]
+    },
+    "arguments": ["${pluginDir}/bin/backend.mjs"]
+  }
+}
