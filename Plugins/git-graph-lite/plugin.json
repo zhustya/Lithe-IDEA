@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 0,
+  "id": "io.github.zhustya.git-graph-lite",
+  "displayName": "Git Graph Lite (read-only)",
+  "version": "0.1.0",
+  "pluginAPIVersion": 0,
+  "requires": {
+    "backend": 0,
+    "pluginFunctions": 0,
+    "ui": 0
+  },
+  "requiresTools": ["node"],
+  "vendor": {
+    "id": "io.github.zhustya",
+    "displayName": "zhustya",
+    "signatureRequirement": "none"
+  },
+  "permissions": [
+    "backend.launch",
+    "workspace.metadata",
+    "process.run",
+    "ui.contribute",
+    "ui.web"
+  ],
+  "activationEvents": [
+    "onView:io.github.zhustya.git-graph-lite.window"
+  ],
+  "languages": [],
+  "ui": {
+    "toolWindows": [
+      {
+        "id": "io.github.zhustya.git-graph-lite.window",
+        "title": "Git Graph",
+        "placement": "right",
+        "order": 320,
+        "web": { "entry": "ui/index.html" },
+        "icon": { "host": "plugin" }
+      }
+    ]
+  },
+  "backend": {
+    "launch": {
+      "kind": "runtime",
+      "tool": "node",
+      "minimumVersion": "20.3",
+      "entry": "bin/backend.mjs"
+    }
+  }
+}
