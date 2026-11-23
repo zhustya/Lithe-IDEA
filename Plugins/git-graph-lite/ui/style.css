@@ -26,7 +26,7 @@ body {
 .row { display: flex; align-items: center; height: 26px; white-space: nowrap; cursor: pointer; }
 .row:hover { background: var(--lithe-hover, rgba(255,255,255,.06)); }
 .row.selected { background: var(--lithe-selected, rgba(80,120,200,.2)); }
-.lanes { position: relative; flex: 0 0 auto; height: 26px; }
+.lanes { position: relative; flex: 0 0 auto; display: block; }
 .refs { flex: 0 0 auto; display: flex; gap: 4px; margin-right: 6px; }
 .ref { border-radius: 8px; padding: 1px 6px; font-size: 10px; border: 1px solid transparent; }
 .ref.head { color: #fff; background: #2d7d46; }
