@@ -142,19 +142,20 @@ function canvasesFor(s, width, query) {
         if (pi === undefined) continue;
         const px = chunk[pi].lane * LANE + LANE / 2 + 8;
         const py = pi * ROW + ROW / 2;
-        // Git Graph style: a straight vertical trunk and a short bend only
-        // where the branch joins its parent, instead of a large S-curve.
+        // Git Graph style: jump to the parent's lane right after the child
+        // (the merge point), then run straight down that lane. The parent's
+        // color keeps a branch line continuous through merges.
         let d;
         if (px === x) {
           d = `M ${x} ${y} L ${x} ${py}`;
         } else {
           const dir = px > x ? 1 : -1;
-          const bend = Math.min(9, Math.abs(px - x));
-          d = `M ${x} ${y} L ${x} ${py - 9} Q ${x} ${py} ${x + dir * bend} ${py} L ${px} ${py}`;
+          const bend = Math.min(10, Math.abs(px - x));
+          d = `M ${x} ${y} L ${x} ${y + 6} Q ${x} ${y + 14} ${x + dir * bend} ${y + 14} L ${px} ${y + 14} L ${px} ${py}`;
         }
         nodes.push({
           type: 'path', d: d,
-          stroke: COLORS[commit.lane % COLORS.length], width: 2,
+          stroke: COLORS[chunk[pi].lane % COLORS.length], width: 2,
         });
       }
     }
