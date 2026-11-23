@@ -1,5 +1,6 @@
 // Git Graph (Native View): read-only git history drawn with Lithe plugin views.
-// No web view, no WebView lifecycle issues; host renders the canvas natively.
+// Renders all branches with --all, and adapts to Core's view limits by using
+// multiple canvas scenes and pagination for very large repositories.
 import { spawn } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -9,11 +10,16 @@ const FIELD = '\x1f';
 const RECORD = '\x1e';
 const ROW = 26;
 const LANE = 14;
+// Core limits: a canvas <= 256 KiB JSON, <= 2000 points high, a view <= 8 canvases.
+// 300 trimmed commits/canvas is ~100 KiB; 8 canvases/page = 2400 commits.
+const CHUNK = 300;
+const MAX_CANVASES = 8;
+const PAGE_SIZE = CHUNK * MAX_CANVASES;
 const COLORS = ['#e06060', '#60a0e0', '#60c090', '#c090e0', '#e0b040', '#40b0c0', '#d070a0', '#90a0b0'];
 
 function runGit(repo, args) {
   return new Promise((done, fail) => {
-    const child = spawn('git', args, { cwd: repo, windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+    const child = spawn('git', args, { cwd: repo, windowsHide: true, maxBuffer: 32 * 1024 * 1024 });
     let out = '', err = '';
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -64,12 +70,9 @@ function parseRefs(decoration) {
   });
 }
 
-async function readLog(repo, limit) {
-  const count = Math.min(Math.max(Number(limit) || 200, 1), 1000);
+async function readLog(repo) {
   const format = ['%H', '%P', '%an', '%aI', '%s', '%D'].join(FIELD) + RECORD;
-  // --all includes commits from every branch/tag, not just HEAD's ancestry;
-  // --topo-order keeps children next to their parents for clean lanes.
-  const text = await runGit(repo, ['log', '--all', '--topo-order', `--max-count=${count}`, `--pretty=format:${format}`, '--no-color']);
+  const text = await runGit(repo, ['log', '--all', '--topo-order', `--max-count=${PAGE_SIZE}`, `--pretty=format:${format}`, '--no-color']);
   const commits = [];
   for (const chunk of text.split(RECORD)) {
     const f = chunk.trim().split(FIELD);
@@ -102,9 +105,6 @@ function layout(list) {
     if (lane < 0) { lane = lanes.indexOf(null); if (lane < 0) lane = lanes.length; }
     commit.lane = lane;
     lanes[lane] = null;
-    // A parent already tracked in another lane must not be registered twice:
-    // a duplicate makes the stale lane keep the same hash forever, so later
-    // commits are assigned to the wrong lane and their edges/dots look broken.
     const first = commit.parents[0];
     if (first && !lanes.includes(first)) lanes[lane] = first;
     for (const parent of commit.parents.slice(1)) {
@@ -119,24 +119,26 @@ function layout(list) {
 const states = new Map();
 function stateOf(event) {
   if (!states.has(event.instance)) {
-    states.set(event.instance, { repo: '', limit: '1000', search: '', selected: '', repos: [], commits: [], detail: null });
+    states.set(event.instance, { repo: '', search: '', offset: 0, selected: '', repos: [], commits: [], detail: null });
   }
   return states.get(event.instance);
 }
 
-const CHUNK = 125;
-function canvasesFor(s, width, query) {
-  const list = query
+function canvasesFor(s, width) {
+  const query = s.search.trim().toLowerCase();
+  const all = query
     ? s.commits.filter((c) => c.subject.toLowerCase().includes(query) || c.author.toLowerCase().includes(query) || c.hash.includes(query))
     : s.commits;
-  const { byHash: globalByHash, laneCount } = layout(list);
-  const globalIndex = new Map(list.map((c, i) => [c.hash, i]));
+  const { byHash: globalByHash, laneCount } = layout(all);
+  const globalIndex = new Map(all.map((c, i) => [c.hash, i]));
+  const offset = Math.min(Math.max(s.offset, 0), Math.max(all.length - 1, 0));
+  const page = all.slice(offset, offset + PAGE_SIZE);
   const w = Math.max(Number(width) || 900, 640);
   const refsStart = laneCount * LANE + 12;
   const scenes = [];
 
-  for (let start = 0; start < list.length; start += CHUNK) {
-    const chunk = list.slice(start, start + CHUNK);
+  for (let start = 0; start < page.length; start += CHUNK) {
+    const chunk = page.slice(start, start + CHUNK);
     const local = new Map(chunk.map((c, i) => [c.hash, i]));
     const contentHeight = Math.max(chunk.length * ROW + 8, 40);
     const nodes = [];
@@ -150,46 +152,32 @@ function canvasesFor(s, width, query) {
         if (pi === undefined) continue;
         const px = chunk[pi].lane * LANE + LANE / 2 + 8;
         const py = pi * ROW + ROW / 2;
-        // Git Graph style: jump to the parent's lane right after the child
-        // (the merge point), then run straight down that lane. The parent's
-        // color keeps a branch line continuous through merges.
-        let d;
-        if (px === x) {
-          d = `M ${x} ${y} L ${x} ${py}`;
-        } else {
-          const dir = px > x ? 1 : -1;
-          const bend = Math.min(6, Math.abs(px - x));
-          d = `M ${x} ${y} L ${x} ${y + 5} Q ${x} ${y + 11} ${x + dir * bend} ${y + 11} L ${px} ${y + 11} L ${px} ${py}`;
-        }
         nodes.push({
-          type: 'path', d: d,
-          stroke: COLORS[chunk[pi].lane % COLORS.length], width: 2,
+          type: 'path', d: `M ${x} ${y} L ${px} ${py}`,
+          stroke: COLORS[chunk[pi].lane % COLORS.length],
         });
       }
     }
 
-    // Bridge scene boundaries: a parent in the previous/next chunk has no
-    // local row, so draw a short continuation stub at the top/bottom edge.
+    // Continuation stubs at scene boundaries (parent outside this chunk).
     for (let i = 0; i < chunk.length; i++) {
       const commit = chunk[i];
       const x = commit.lane * LANE + LANE / 2 + 8;
       const y = i * ROW + ROW / 2;
       for (const parentHash of commit.parents) {
         const gi = globalIndex.get(parentHash);
-        if (gi === undefined || (gi >= start && gi < start + chunk.length)) continue;
+        if (gi === undefined || (gi >= offset + start && gi < offset + start + chunk.length)) continue;
         const parent = globalByHash.get(parentHash);
         if (!parent) continue;
         const px = parent.lane * LANE + LANE / 2 + 8;
         const color = COLORS[parent.lane % COLORS.length];
-        if (gi < start) {
-          // Parent was in the previous scene: line enters from the top.
-          nodes.push({ type: 'path', d: `M ${px} 0 L ${px} ${y} L ${x} ${y}`, stroke: color, width: 2 });
+        if (gi < offset + start) {
+          nodes.push({ type: 'path', d: `M ${px} 0 L ${px} ${y} L ${x} ${y}`, stroke: color });
         } else {
-          // Parent is in the next scene: line leaves through the bottom.
           const d = px === x
             ? `M ${x} ${y} L ${x} ${contentHeight}`
             : `M ${x} ${y} L ${x} ${contentHeight - 4} L ${px} ${contentHeight - 4} L ${px} ${contentHeight}`;
-          nodes.push({ type: 'path', d: d, stroke: color, width: 2 });
+          nodes.push({ type: 'path', d: d, stroke: color });
         }
       }
     }
@@ -197,72 +185,61 @@ function canvasesFor(s, width, query) {
     for (let i = 0; i < chunk.length; i++) {
       const commit = chunk[i];
       const x = commit.lane * LANE + LANE / 2 + 8;
-      const children = [];
       const selected = commit.hash === s.selected;
-      if (selected) {
-        children.push({ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$hover', opacity: 0.45 });
-      }
-      if (selected) {
-        // Git Graph marks the selected commit with a hollow square.
-        children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 1,
-          fill: '$background', stroke: '$accent', width: 2 });
-      } else {
-        children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 5,
-          fill: COLORS[commit.lane % COLORS.length], stroke: commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined, width: 2 });
-      }
-
-      let refX = refsStart;
-      for (const ref of commit.refs) {
-        const label = ref.name.length > 22 ? ref.name.slice(0, 21) + '…' : ref.name;
-        const badgeW = label.length * 6.5 + 12;
+      const dot = {
+        type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10,
+        fill: selected ? '$background' : COLORS[commit.lane % COLORS.length],
+        stroke: selected || commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined,
+      };
+      const runs = [];
+      for (const ref of commit.refs.slice(0, 2)) {
+        const label = ref.name.length > 16 ? ref.name.slice(0, 15) + '…' : ref.name;
         const fill = ref.kind === 'head' ? '$error' : ref.kind === 'tag' ? '$warning' : ref.kind === 'remote' ? '#6b46c1' : '$accent';
-        children.push({ type: 'rect', x: refX, y: 6, w: badgeW, h: 14, radius: 7, fill: fill });
-        children.push({ type: 'text', x: refX + 6, y: 17, style: 'caption', text: label, color: '#ffffff' });
-        refX += badgeW + 6;
+        runs.push({ text: label + ' ', color: fill });
       }
-
-      children.push({ type: 'text', x: Math.max(refX, refsStart) + 8, y: 17, style: 'body', text: commit.subject, maxWidth: Math.max(w - refsStart - 240, 120) });
-      children.push({ type: 'text', x: w - 100, y: 17, style: 'caption', text: commit.author.slice(0, 14), color: '$textSecondary', align: 'end' });
-      children.push({ type: 'text', x: w - 8, y: 17, style: 'caption', text: commit.date.slice(0, 10), color: '$textMuted', align: 'end' });
-
+      runs.push({ text: commit.subject.slice(0, 36) });
+      const children = selected
+        ? [{ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$hover', opacity: 0.45 }, dot,
+           { type: 'text', x: refsStart, y: 17, runs: runs }]
+        : [dot, { type: 'text', x: refsStart, y: 17, runs: runs }];
       nodes.push({
-        type: 'group', id: 'commit-' + commit.hash.slice(0, 12), x: 0, y: i * ROW, w: w, h: ROW,
-        label: commit.subject, on: ['click'], children: children,
+        type: 'group', id: 'commit-' + commit.hash.slice(0, 10), x: 0, y: i * ROW, w: w, h: ROW,
+        label: commit.hash.slice(0, 10), on: ['click'], children: children,
       });
     }
 
     scenes.push({
-      type: 'canvas', id: 'graph-' + start,
-      label: `Commits ${start + 1}–${start + chunk.length}`,
-      // Core caps a canvas widget at 2000 points; taller scenes pan inside it.
+      type: 'canvas', id: 'graph-' + (offset + start),
+      label: `Commits ${offset + start + 1}–${offset + start + chunk.length}`,
       height: Math.min(contentHeight, 2000),
       viewBox: [0, 0, w, contentHeight],
       ...(contentHeight > 2000 ? { pan: true } : {}),
       on: ['resize'], nodes: nodes,
     });
   }
-  return scenes;
+  return { scenes: scenes, offset: offset, shown: page.length, total: all.length };
 }
 
 function viewFor(s, event) {
   const width = typeof event.width === 'number' ? event.width : undefined;
-  const controls = [
-    {
-      type: 'select', id: 'repo', label: 'Repository', value: s.repo,
-      options: s.repos.map((r) => ({ value: r.id, label: r.name })),
-    },
-    { type: 'button', id: 'refresh', text: 'Refresh' },
-    { type: 'select', id: 'limit', label: 'Count', value: s.limit, options: ['200', '500', '1000'].map((v) => ({ value: v, label: v })) },
-    { type: 'textField', id: 'search', label: 'Search', value: s.search, placeholder: 'subject / author / hash', width: 'fill' },
-  ];
-  const nodes = [{ type: 'row', children: controls }];
+  const info = canvasesFor(s, width);
+  const repo = s.repos.find((r) => r.id === s.repo);
+  const nodes = [{
+    type: 'row', children: [
+      { type: 'select', id: 'repo', label: 'Repository', value: s.repo, options: s.repos.map((r) => ({ value: r.id, label: r.name })) },
+      { type: 'button', id: 'refresh', text: 'Refresh' },
+      { type: 'textField', id: 'search', label: 'Search', value: s.search, placeholder: 'subject / author / hash', width: 'fill' },
+      { type: 'button', id: 'prev', text: '‹ Newer', enabled: info.offset > 0 },
+      { type: 'button', id: 'next', text: 'Older ›', enabled: info.offset + info.shown < info.total },
+    ],
+  }];
 
   if (!s.repos.length) {
     nodes.push({ type: 'banner', text: 'No Git repositories found in the open workspace.', tone: 'warning' });
     return { view: nodes };
   }
-  nodes.push({ type: 'label', text: `${s.commits.length} commits · ${s.repos.find((r) => r.id === s.repo)?.name || ''}`, tone: 'muted' });
-  nodes.push(...canvasesFor(s, width, s.search.trim().toLowerCase()));
+  nodes.push({ type: 'label', text: `${info.offset + 1}–${info.offset + info.shown} of ${info.total} commits · ${repo?.name || ''}`, tone: 'muted' });
+  nodes.push(...info.scenes);
 
   if (s.detail) {
     const d = s.detail;
@@ -274,7 +251,7 @@ function viewFor(s, event) {
       ] },
       { type: 'label', text: d.message, style: 'body' },
       { type: 'label', text: d.files.length ? 'Changed files' : 'No changed files', style: 'strong' },
-      ...d.files.slice(0, 80).map((f) => ({ type: 'label', text: `${f.status}  ${f.path}`, style: 'mono', info: f.path })),
+      ...d.files.slice(0, 60).map((f) => ({ type: 'label', text: `${f.status}  ${f.path}`, style: 'mono', info: f.path })),
     ] });
   }
   return { view: nodes };
@@ -284,27 +261,28 @@ async function refresh(s, event) {
   s.repos = await discoverRepos();
   if (!s.repos.some((r) => r.id === s.repo)) s.repo = s.repos[0]?.id || '';
   const repo = s.repos.find((r) => r.id === s.repo);
-  s.commits = repo ? await readLog(repo.path, s.limit) : [];
+  s.commits = repo ? await readLog(repo) : [];
+  s.offset = 0;
   s.detail = null;
   return viewFor(s, event);
 }
 
-const backend = createBackend({ name: 'git-graph-native', version: '0.1.0' });
+const backend = createBackend({ name: 'git-graph-native', version: '0.2.2' });
 
 backend.view('graph.draw', async (event) => {
   const s = stateOf(event);
   if (event.event === 'close') { states.delete(event.instance); return {}; }
   if (event.event === 'open') return refresh(s, event);
   if (event.event === 'change') {
-    if (event.node === 'repo') s.repo = String(event.value || '');
-    else if (event.node === 'limit') s.limit = String(event.value || '1000');
-    else if (event.node === 'search') s.search = String(event.value || '');
+    if (event.node === 'repo') { s.repo = String(event.value || ''); s.offset = 0; }
+    else if (event.node === 'search') { s.search = String(event.value || ''); s.offset = 0; }
     else return {};
-    if (event.node !== 'search') return refresh(s, event);
     return viewFor(s, event);
   }
   if (event.event === 'click') {
     if (event.node === 'refresh') return refresh(s, event);
+    if (event.node === 'prev') { s.offset = Math.max(0, s.offset - PAGE_SIZE); return viewFor(s, event); }
+    if (event.node === 'next') { s.offset += PAGE_SIZE; return viewFor(s, event); }
     if (String(event.canvas || '').startsWith('graph-') && String(event.node || '').startsWith('commit-')) {
       const prefix = event.node.slice(7);
       const commit = s.commits.find((c) => c.hash.startsWith(prefix));
