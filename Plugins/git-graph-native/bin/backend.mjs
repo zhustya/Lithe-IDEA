@@ -290,8 +290,8 @@ backend.view('graph.draw', async (event) => {
   if (event.event === 'close') { states.delete(event.instance); return {}; }
   if (event.event === 'open') return refresh(s, event);
   if (event.event === 'change') {
-    if (event.node === 'repo') { s.repo = String(event.value || ''); s.offset = 0; }
-    else if (event.node === 'search') { s.search = String(event.value || ''); s.offset = 0; }
+    if (event.node === 'repo') { s.repo = String(event.value || ''); return refresh(s, event); }
+    if (event.node === 'search') { s.search = String(event.value || ''); s.offset = 0; }
     else return {};
     return viewFor(s, event);
   }
