@@ -28,9 +28,35 @@
 
   function status(text) { el.status.textContent = text || ''; }
 
+  // The host injects its bridge script before page scripts, but the underlying
+  // channel can become available slightly later in some web views. Wait briefly
+  // instead of failing with "Cannot read properties of undefined".
+  let bridgeReloaded = false;
+  function waitForBridge(timeout) {
+    const limit = timeout || 8000;
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const check = () => {
+        if (window.lithe && typeof window.lithe.request === 'function') return resolve();
+        // The injected bootstrap returns early when window.viva is not ready yet.
+        // Retry it once from the host-served path after the channel has settled.
+        if (!bridgeReloaded && Date.now() - started > 300) {
+          bridgeReloaded = true;
+          const script = document.createElement('script');
+          script.src = '/.lithe-host/bridge.js';
+          document.head.appendChild(script);
+        }
+        if (Date.now() - started >= limit) return reject(new Error('Lithe bridge is unavailable in this page.'));
+        setTimeout(check, 50);
+      };
+      check();
+    });
+  }
+
   async function call(fn, params) {
+    await waitForBridge();
     const answer = await window.lithe.request('functions.invoke', { function: fn, params: params || {} });
-    return answer.value;
+    return answer ? answer.value : undefined;
   }
 
   function currentRepo() {
@@ -174,9 +200,14 @@
         const path = document.createElement('span');
         path.textContent = file.path;
         line.append(st, path);
-        line.addEventListener('click', () => {
+        line.addEventListener('click', async () => {
           const full = repo.path.replace(/\\/g, '/') + '/' + file.path;
-          window.lithe.request('workspace.openFile', { path: full }).catch((err) => status(err.message));
+          try {
+            await waitForBridge();
+            await window.lithe.request('workspace.openFile', { path: full });
+          } catch (err) {
+            status(err.message || String(err));
+          }
         });
         el.detailFiles.appendChild(line);
       }
@@ -225,7 +256,9 @@
 
   el.repo.addEventListener('change', () => {
     state.repo = el.repo.value;
-    window.lithe.request('ui.setState', { state: JSON.stringify(state) }).catch(() => {});
+    if (window.lithe && typeof window.lithe.request === 'function') {
+      window.lithe.request('ui.setState', { state: JSON.stringify(state) }).catch(() => {});
+    }
     el.detail.hidden = true;
     loadGraph();
   });
@@ -239,9 +272,12 @@
 
   (async function start() {
     try {
+      await waitForBridge();
       const saved = await window.lithe.request('ui.getState', {});
       if (saved && saved.state) state = JSON.parse(saved.state) || state;
-    } catch { /* first run has no state */ }
+    } catch (error) {
+      status(error.message || String(error));
+    }
     await loadRepos();
   })();
 })();
