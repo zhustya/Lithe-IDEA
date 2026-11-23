@@ -261,7 +261,7 @@ async function refresh(s, event) {
   s.repos = await discoverRepos();
   if (!s.repos.some((r) => r.id === s.repo)) s.repo = s.repos[0]?.id || '';
   const repo = s.repos.find((r) => r.id === s.repo);
-  s.commits = repo ? await readLog(repo) : [];
+  s.commits = repo ? await readLog(repo.path) : [];
   s.offset = 0;
   s.detail = null;
   return viewFor(s, event);
