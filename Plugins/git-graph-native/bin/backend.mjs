@@ -117,71 +117,75 @@ function stateOf(event) {
   return states.get(event.instance);
 }
 
-function canvasFor(s, width, query) {
+const CHUNK = 70;
+function canvasesFor(s, width, query) {
   const list = query
     ? s.commits.filter((c) => c.subject.toLowerCase().includes(query) || c.author.toLowerCase().includes(query) || c.hash.includes(query))
     : s.commits;
-  const { byHash, laneCount } = layout(list);
+  const { laneCount } = layout(list);
   const w = Math.max(Number(width) || 900, 640);
-  const contentHeight = Math.max(list.length * ROW + 8, 40);
-  // Core caps a canvas widget at 2000 points; a taller scene uses panning.
-  const height = Math.min(contentHeight, 2000);
   const refsStart = laneCount * LANE + 20;
-  const nodes = [];
+  const scenes = [];
 
-  for (let i = 0; i < list.length; i++) {
-    const commit = list[i];
-    const x = commit.lane * LANE + LANE / 2 + 8;
-    const y = i * ROW + ROW / 2;
-    for (const parentHash of commit.parents) {
-      const parent = byHash.get(parentHash);
-      if (!parent || parent.lane === undefined) continue;
-      const px = parent.lane * LANE + LANE / 2 + 8;
-      const py = list.indexOf(parent) * ROW + ROW / 2;
+  for (let start = 0; start < list.length; start += CHUNK) {
+    const chunk = list.slice(start, start + CHUNK);
+    const local = new Map(chunk.map((c, i) => [c.hash, i]));
+    const contentHeight = Math.max(chunk.length * ROW + 8, 40);
+    const nodes = [];
+
+    for (let i = 0; i < chunk.length; i++) {
+      const commit = chunk[i];
+      const x = commit.lane * LANE + LANE / 2 + 8;
+      const y = i * ROW + ROW / 2;
+      for (const parentHash of commit.parents) {
+        const pi = local.get(parentHash);
+        if (pi === undefined) continue;
+        const px = chunk[pi].lane * LANE + LANE / 2 + 8;
+        const py = pi * ROW + ROW / 2;
+        nodes.push({
+          type: 'path',
+          d: `M ${x} ${y} C ${x} ${(y + py) / 2}, ${px} ${(y + py) / 2}, ${px} ${py}`,
+          stroke: COLORS[commit.lane % COLORS.length], width: 2,
+        });
+      }
+    }
+
+    for (let i = 0; i < chunk.length; i++) {
+      const commit = chunk[i];
+      const x = commit.lane * LANE + LANE / 2 + 8;
+      const children = [];
+      if (commit.hash === s.selected) {
+        children.push({ type: 'rect', x: 0, y: 0, w: w, h: ROW, fill: '$selection' });
+      }
+      children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 5, fill: COLORS[commit.lane % COLORS.length], stroke: commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined, width: 2 });
+
+      let refX = refsStart;
+      for (const ref of commit.refs) {
+        const label = ref.name.length > 22 ? ref.name.slice(0, 21) + '…' : ref.name;
+        const badgeW = label.length * 6.5 + 12;
+        const fill = ref.kind === 'head' ? '$error' : ref.kind === 'tag' ? '$warning' : ref.kind === 'remote' ? '#6b46c1' : '$accent';
+        children.push({ type: 'rect', x: refX, y: 6, w: badgeW, h: 14, radius: 7, fill: fill });
+        children.push({ type: 'text', x: refX + 6, y: 17, style: 'caption', text: label, color: '#ffffff' });
+        refX += badgeW + 6;
+      }
+
+      children.push({ type: 'text', x: Math.max(refX, refsStart) + 8, y: 17, style: 'body', text: commit.subject, maxWidth: Math.max(w - refsStart - 240, 120) });
+      children.push({ type: 'text', x: w - 100, y: 17, style: 'caption', text: commit.author.slice(0, 14), color: '$textSecondary', align: 'end' });
+      children.push({ type: 'text', x: w - 8, y: 17, style: 'caption', text: commit.date.slice(0, 10), color: '$textMuted', align: 'end' });
+
       nodes.push({
-        type: 'path', d: `M ${x} ${y} C ${x} ${(y + py) / 2}, ${px} ${(y + py) / 2}, ${px} ${py}`,
-        stroke: COLORS[commit.lane % COLORS.length], width: 2,
+        type: 'group', id: 'commit-' + commit.hash.slice(0, 12), x: 0, y: i * ROW, w: w, h: ROW,
+        label: commit.subject, on: ['click'], children: children,
       });
     }
-  }
 
-  for (let i = 0; i < list.length; i++) {
-    const commit = list[i];
-    const x = commit.lane * LANE + LANE / 2 + 8;
-    const color = COLORS[commit.lane % COLORS.length];
-    const children = [];
-    if (commit.hash === s.selected) {
-      children.push({ type: 'rect', x: 0, y: 0, w, h: ROW, fill: '$selection' });
-    }
-    children.push({ type: 'rect', x: x - 5, y: ROW / 2 - 5, w: 10, h: 10, radius: 5, fill: color, stroke: commit.refs.some((r) => r.kind === 'head') ? '$error' : undefined, width: 2 });
-
-    let refX = refsStart;
-    for (const ref of commit.refs) {
-      const label = ref.name.length > 22 ? ref.name.slice(0, 21) + '…' : ref.name;
-      const badgeW = label.length * 6.5 + 12;
-      const fill = ref.kind === 'head' ? '$error' : ref.kind === 'tag' ? '$warning' : ref.kind === 'remote' ? '#6b46c1' : '$accent';
-      children.push({ type: 'rect', x: refX, y: 6, w: badgeW, h: 14, radius: 7, fill });
-      children.push({ type: 'text', x: refX + 6, y: 17, style: 'caption', text: label, color: '#ffffff' });
-      refX += badgeW + 6;
-    }
-
-    children.push({ type: 'text', x: Math.max(refX, refsStart) + 8, y: 17, style: 'body', text: commit.subject, maxWidth: Math.max(w - refsStart - 240, 120) });
-    children.push({ type: 'text', x: w - 100, y: 17, style: 'caption', text: commit.author.slice(0, 14), color: '$textSecondary', align: 'end' });
-    children.push({ type: 'text', x: w - 8, y: 17, style: 'caption', text: commit.date.slice(0, 10), color: '$textMuted', align: 'end' });
-
-    nodes.push({
-      type: 'group', id: 'commit-' + commit.hash.slice(0, 12), x: 0, y: i * ROW, w, h: ROW,
-      label: commit.subject, on: ['click'], children,
+    scenes.push({
+      type: 'canvas', id: 'graph-' + start,
+      label: `Commits ${start + 1}–${start + chunk.length}`,
+      height: contentHeight, viewBox: [0, 0, w, contentHeight], on: ['resize'], nodes: nodes,
     });
   }
-
-  return {
-    type: 'canvas', id: 'graph', label: 'Commit graph', height: height,
-    viewBox: [0, 0, w, contentHeight],
-    ...(contentHeight > height ? { pan: true } : {}),
-    on: ['resize'],
-    nodes,
-  };
+  return scenes;
 }
 
 function viewFor(s, event) {
@@ -202,7 +206,7 @@ function viewFor(s, event) {
     return { view: nodes };
   }
   nodes.push({ type: 'label', text: `${s.commits.length} commits · ${s.repos.find((r) => r.id === s.repo)?.name || ''}`, tone: 'muted' });
-  nodes.push(canvasFor(s, width, s.search.trim().toLowerCase()));
+  nodes.push(...canvasesFor(s, width, s.search.trim().toLowerCase()));
 
   if (s.detail) {
     const d = s.detail;
@@ -245,7 +249,7 @@ backend.view('graph.draw', async (event) => {
   }
   if (event.event === 'click') {
     if (event.node === 'refresh') return refresh(s, event);
-    if (event.canvas === 'graph' && String(event.node || '').startsWith('commit-')) {
+    if (String(event.canvas || '').startsWith('graph-') && String(event.node || '').startsWith('commit-')) {
       const prefix = event.node.slice(7);
       const commit = s.commits.find((c) => c.hash.startsWith(prefix));
       if (!commit) return {};
