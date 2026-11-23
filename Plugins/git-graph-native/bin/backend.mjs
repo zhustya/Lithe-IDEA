@@ -117,7 +117,7 @@ function stateOf(event) {
   return states.get(event.instance);
 }
 
-const CHUNK = 70;
+const CHUNK = 125;
 function canvasesFor(s, width, query) {
   const list = query
     ? s.commits.filter((c) => c.subject.toLowerCase().includes(query) || c.author.toLowerCase().includes(query) || c.hash.includes(query))
@@ -191,7 +191,11 @@ function canvasesFor(s, width, query) {
     scenes.push({
       type: 'canvas', id: 'graph-' + start,
       label: `Commits ${start + 1}–${start + chunk.length}`,
-      height: contentHeight, viewBox: [0, 0, w, contentHeight], on: ['resize'], nodes: nodes,
+      // Core caps a canvas widget at 2000 points; taller scenes pan inside it.
+      height: Math.min(contentHeight, 2000),
+      viewBox: [0, 0, w, contentHeight],
+      ...(contentHeight > 2000 ? { pan: true } : {}),
+      on: ['resize'], nodes: nodes,
     });
   }
   return scenes;
