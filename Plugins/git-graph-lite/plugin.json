@@ -2,13 +2,12 @@
   "schemaVersion": 0,
   "id": "io.github.zhustya.git-graph-lite",
   "displayName": "Git Graph Lite (read-only)",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "pluginAPIVersion": 0,
   "requires": {
     "backend": 0,
     "ui": 0
   },
-  "requiresTools": ["node"],
   "vendor": {
     "id": "io.github.zhustya",
     "displayName": "zhustya",
@@ -39,10 +38,9 @@
   },
   "backend": {
     "launch": {
-      "kind": "runtime",
-      "tool": "node",
-      "minimumVersion": "20.3",
-      "entry": "bin/backend.mjs"
-    }
+      "kind": "systemCommand",
+      "commands": ["node"]
+    },
+    "arguments": ["${pluginDir}/bin/backend.mjs"]
   }
 }
