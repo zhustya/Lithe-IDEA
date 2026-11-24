@@ -27,13 +27,13 @@ var (
 	// commas, so a key can be rotated. Both channels and every feed address the user sets are
 	// checked against them.
 	UpdatePublicKeys string
-	// StableFeedURL and AutoBuildFeedURL are the default feeds of the channels, on the official
-	// repository's desktop-update-feed release. A fork that signs its own feeds sets them.
-	StableFeedURL    = "https://github.com/1lck/Lithe-IDEA/releases/download/desktop-update-feed/stable.json"
-	AutoBuildFeedURL = "https://github.com/1lck/Lithe-IDEA/releases/download/desktop-update-feed/autobuild.json"
+	// StableFeedURL and AutoBuildFeedURL are the default feeds of the channels, on this fork's
+	// desktop-update-feed release. A fork that signs its own feeds sets them.
+	StableFeedURL    = "https://github.com/zhustya/Lithe-IDEA/releases/download/desktop-update-feed/stable.json"
+	AutoBuildFeedURL = "https://github.com/zhustya/Lithe-IDEA/releases/download/desktop-update-feed/autobuild.json"
 	// DownloadsURL is where a user downloads Lithe by hand, for an installation that cannot
 	// update itself.
-	DownloadsURL = "https://github.com/1lck/Lithe-IDEA/releases"
+	DownloadsURL = "https://github.com/zhustya/Lithe-IDEA/releases"
 )
 
 // UpdateApp is the identifier the feed and the installed application carry.
