@@ -451,11 +451,11 @@ func (v *View) paintSingleHint(canvas *gfx.Canvas, h *preparedInlayHint, shift i
 	// A hint is virtual text, not a field: a muted label on a soft rounded tint, with no
 	// border or per-token color, so it reads as a quiet annotation instead of an input.
 	fg := look.Subtle
-	background := look.Foreground
+	background := look.Caret
 	if look.Dark {
-		background.Alpha = 0.08
+		background.Alpha = 0.20
 	} else {
-		background.Alpha = 0.05
+		background.Alpha = 0.16
 	}
 
 	textX := v.textLeft + float32(h.cell+h.padLeft-shift)*v.cellW - v.scrollX
