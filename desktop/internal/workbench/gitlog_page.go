@@ -175,12 +175,9 @@ type logView struct {
 	fileWidthOf   string
 	fileWidthFont float32
 
-	colors       map[int32]gfx.Color
-	colorsDark   bool
-	dates        map[string]string
-	upstream     map[string]string
-	upstreamFor  *logSection
-	upstreamRefs int
+	dates map[string]string
+	// lanes assigns the graph's lane colors.
+	lanes laneColors
 	// dateWidth is the width of the date column, measured for fonts dateFonts.
 	dateWidth float32
 	dateFonts uint32
@@ -201,7 +198,6 @@ func (v *logView) reset() {
 	}
 	v.file, v.folder = "", ""
 	v.dates = nil
-	v.upstream = nil
 	v.commits = ui.ListState{Label: v.commits.Label}
 	v.chosen.Clear()
 	v.keyRows, v.keys = nil, nil

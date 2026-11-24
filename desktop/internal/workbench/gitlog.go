@@ -241,8 +241,6 @@ func (a *App) loadLog(p *project) {
 	l.loadingMore, l.moreFailed, l.limitReached, l.window = false, false, false, nil
 	l.graph, l.currentRows = core.Graph{}, nil
 	l.pathFiles = nil
-	// The upstreams the graph paints were read for the repository before this one.
-	a.logView.upstream, a.logView.upstreamFor = nil, nil
 	a.selectCommit(p, "")
 	if !p.logHasRepository() {
 		l.loading = false

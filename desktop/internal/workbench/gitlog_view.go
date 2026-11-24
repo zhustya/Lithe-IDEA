@@ -520,12 +520,15 @@ func (a *App) chooseLogRef(p *project, r logRefRow, query string, clicked bool, 
 	}
 }
 
-// drawLogCommits declares the commit pane: the filter bar over the list.
+// drawLogCommits declares the commit pane: the filter bar, the column header of the list
+// and the list.
 func (a *App) drawLogCommits(c ui.C, p *project) ui.Box {
-	return ui.Column(c).FillHeight().MinWidth(logCommitsMin).Clip().Children(func() {
+	styles := a.gitListPalette()
+	return ui.Column(c).FillHeight().MinWidth(logCommitsMin).Clip().Background(styles.contents).Children(func() {
 		a.drawLogToolbar(c, p)
 		ui.Divider(c)
 		a.drawSyncStatus(c, p)
+		a.drawLogHeader(c)
 		a.drawLogList(c, p)
 	})
 }
@@ -920,13 +923,12 @@ func (a *App) drawLogRow(c ui.C, p *project, rows []core.GraphRow, row ui.ListRo
 		return
 	}
 	box := row.Element.Height(logRowHeight).FillWidth()
+	styles := a.gitListPalette()
 	switch {
 	case rows[i].CommitHash == l.selected || v.chosen.Len() > 1 && v.commits.Chosen(i):
-		box = box.Background(a.colors.Selection)
-	case l.currentRows[rows[i].CommitHash]:
-		box = box.Background(currentBranchBackground(a.colors.Dark)).Hover(ui.Look{}.Background(a.colors.Hover))
+		box = box.Background(styles.selection)
 	default:
-		box = box.Hover(ui.Look{}.Background(a.colors.Hover))
+		box = box.Hover(ui.Look{}.Background(styles.hover))
 	}
 	// The menu hangs on the row the list already identifies: an identity of its own would
 	// take the row's presses from the list, which then never chooses the commit.

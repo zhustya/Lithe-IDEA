@@ -25,10 +25,8 @@ const (
 	logFontSize  = 13
 	logMetaSize  = 12
 	logRefSize   = 12
-	// logAuthorWidth is the author column; logMetaGap is the room the author column and
-	// the gaps around it take before the date.
+	// logAuthorWidth is the author column of the Worktrees history.
 	logAuthorWidth = 104
-	logMetaGap     = 120
 	logDatePad     = 8
 	logDateFormat  = "2006/1/2 15:04"
 	logDateSample  = "0000/00/00 00:00"
@@ -37,18 +35,20 @@ const (
 	logRootStripWidth = 3
 )
 
-// The logical grid of the graph, scaled from the 22 point rows of IntelliJ's log.
+// The logical grid of the graph, as SourceGit lays it out: a lane every 12 points with a
+// dot of 6 points, a head or merge dot of 12 and a 2 point line.
 const (
-	graphScale       = logRowHeight / 22.0
-	graphLaneSpacing = 16 * graphScale
-	graphTextGap     = 2 * graphScale
+	graphLaneSpacing = 12
+	graphLaneCenter  = 10
+	graphDotRadius   = 3
+	graphHeadRadius  = 6
 )
 
 // graphMetrics is the graph's grid aligned to device pixels, as the macOS painter
 // aligns it: the centers of rows and lanes and the widths of lines and nodes fall on
 // whole pixels, the ones that must be odd on odd pixels.
 type graphMetrics struct {
-	rowCenter, laneSpacing, laneCenter, lineWidth, nodeDiameter, nodeRadius float32
+	rowCenter, laneSpacing, laneCenter, lineWidth, dotRadius, headRadius float32
 }
 
 func newGraphMetrics(scale float32) graphMetrics {
@@ -62,117 +62,79 @@ func newGraphMetrics(scale float32) graphMetrics {
 		}
 		return px / scale
 	}
-	m := graphMetrics{
-		rowCenter:    align(logRowHeight/2, true),
-		laneSpacing:  align(16*graphScale, true),
-		laneCenter:   align(8*graphScale, false),
-		lineWidth:    max(1/scale, align(1.5*graphScale, true)),
-		nodeDiameter: align(8*graphScale, true),
+	return graphMetrics{
+		rowCenter:   align(logRowHeight/2, true),
+		laneSpacing: align(graphLaneSpacing, false),
+		laneCenter:  align(graphLaneCenter, false),
+		lineWidth:   align(2, false),
+		dotRadius:   align(graphDotRadius, false),
+		headRadius:  align(graphHeadRadius, false),
 	}
-	m.nodeRadius = align(m.nodeDiameter/2, false)
-	return m
 }
 
-// line is the segment an element draws in its row, in the row's coordinates: from the
-// center of its lane to the row's edge, or to the middle of the way to the lane it
-// meets in the next row.
-func (m graphMetrics) line(e core.GraphElement) (x0, y0, x1, y1 float32) {
-	x0, y0 = m.laneCenter+float32(e.Position)*m.laneSpacing, m.rowCenter
+// graphSegment is one print element's path in the row's coordinates: the straight part of a
+// lane that keeps its column, or one half of the smooth curve between this row's center and
+// the lane of the adjacent row. The other half is the adjacent row's element, and the two
+// meet with the same tangent at the row's edge, so a branch never shows a sharp corner there.
+// Arrows and the caps of a missing parent stay on a straight segment to the edge, where their
+// heads are drawn.
+type graphSegment struct {
+	x0, y0, x1, y1     float32
+	cx1, cy1, cx2, cy2 float32
+	curved             bool
+}
+
+// segment is the path of element e, from the center of this row toward the row above or
+// below. A lane that changes column follows the half of a cubic whose control points keep
+// the curve vertical at both commit centers, as SourceGit's CommitGraph draws its paths.
+func (m graphMetrics) segment(e core.GraphElement) graphSegment {
+	pos := m.laneCenter + float32(e.Position)*m.laneSpacing
+	adj := m.laneCenter + float32(e.AdjacentPosition)*m.laneSpacing
+	s := graphSegment{x0: pos, y0: m.rowCenter}
 	up := e.Direction == "up"
-	if e.Position == e.AdjacentPosition {
-		gap := float32(0)
-		if e.IsTerminal {
-			gap = m.nodeRadius/2 + 1
+	if e.Position == e.AdjacentPosition || e.IsTerminal || e.HasArrow {
+		switch {
+		case e.IsTerminal:
+			gap := m.dotRadius/2 + 1
+			if up {
+				s.y1 = gap
+			} else {
+				s.y1 = logRowHeight - gap
+			}
+		case up:
+			s.y1 = 0
+		default:
+			s.y1 = logRowHeight
 		}
-		y1 = logRowHeight - gap
-		if up {
-			y1 = gap
-		}
-	} else {
-		y1 = m.rowCenter + logRowHeight/2
-		if up {
-			y1 = m.rowCenter - logRowHeight/2
-		}
+		s.x1 = (pos + adj) / 2
+		return s
 	}
-	x1 = m.laneCenter + float32(e.Position+e.AdjacentPosition)/2*m.laneSpacing
-	return x0, y0, x1, y1
+	half := float32(logRowHeight) / 2
+	if up {
+		s.x0, s.y0 = (pos+adj)/2, m.rowCenter-half
+		s.cx1, s.cy1 = (adj+3*pos)/4, m.rowCenter-half+float32(logRowHeight)/8
+		s.cx2, s.cy2 = pos, m.rowCenter-half+float32(logRowHeight)/4
+		s.x1, s.y1 = pos, m.rowCenter
+	} else {
+		s.x1, s.y1 = (pos+adj)/2, m.rowCenter+half
+		s.cx1, s.cy1 = pos, m.rowCenter+float32(logRowHeight)/4
+		s.cx2, s.cy2 = (3*pos+adj)/4, m.rowCenter+3*float32(logRowHeight)/8
+	}
+	s.curved = true
+	return s
 }
 
-// titleOffset is where the subject of a row starts: the graph's width with six lanes
-// kept for it, so the subjects of a narrow graph line up, plus the text inset.
+// titleOffset is where the subject of a row starts: the room the row's lanes take, as
+// SourceGit measures it, plus the inset its own graph leaves before the text. It covers the
+// lane a half-edge reaches in the neighbouring row too, so a branch that leaves or enters
+// this row never draws over the text.
 func titleOffset(row core.GraphRow) float32 {
 	last := float32(row.Lane)
 	for _, e := range row.PrintElements {
-		last = max(last, float32(e.Position), float32(e.Position+e.AdjacentPosition)/2)
+		last = max(last, float32(e.Position), float32(e.AdjacentPosition))
 	}
-	return float32(math.Floor(float64(max(last+1, 6)*graphLaneSpacing+graphTextGap))) + 2
-}
-
-// graphColor is the color of an edge or node with a color id: a hue derived from the id
-// as the IntelliJ log derives it, at the saturation and brightness of the theme.
-func graphColor(id int32, dark bool, text gfx.Color) gfx.Color {
-	if id == 0 {
-		return text
-	}
-	part := func(m, o int32) float64 {
-		v := (id*m + o) % 100
-		if v < 0 {
-			v = -v
-		}
-		return float64(v+70) / 255
-	}
-	r, g, b := part(200, 30), part(130, 50), part(90, 100)
-	brightness := 0.7
-	if dark {
-		brightness = 0.6
-	}
-	return hsb(hue(r, g, b), 0.6, brightness)
-}
-
-// hue is the hue of an RGB color, in turns.
-func hue(r, g, b float64) float64 {
-	hi, lo := max(r, g, b), min(r, g, b)
-	if hi == lo {
-		return 0
-	}
-	d := hi - lo
-	var h float64
-	switch hi {
-	case r:
-		h = (g - b) / d
-	case g:
-		h = 2 + (b-r)/d
-	default:
-		h = 4 + (r-g)/d
-	}
-	h /= 6
-	if h < 0 {
-		h++
-	}
-	return h
-}
-
-// hsb is the color with a hue in turns, a saturation and a brightness.
-func hsb(h, s, v float64) gfx.Color {
-	h = (h - math.Floor(h)) * 6
-	f := h - math.Floor(h)
-	p, q, t := v*(1-s), v*(1-s*f), v*(1-s*(1-f))
-	var r, g, b float64
-	switch int(h) {
-	case 0:
-		r, g, b = v, t, p
-	case 1:
-		r, g, b = q, v, p
-	case 2:
-		r, g, b = p, v, t
-	case 3:
-		r, g, b = p, q, v
-	case 4:
-		r, g, b = t, p, v
-	default:
-		r, g, b = v, p, q
-	}
-	return gfx.Color{Red: float32(r), Green: float32(g), Blue: float32(b), Alpha: 1}
+	lanes := max(last+1, 1)
+	return float32(math.Floor(float64(lanes*graphLaneSpacing))) + 6
 }
 
 // referenceColor is the color of a reference label's icon by kind.
@@ -194,14 +156,6 @@ func pick(dark bool, darkRGB, lightRGB uint32) gfx.Color {
 		return gfx.RGB24(darkRGB)
 	}
 	return gfx.RGB24(lightRGB)
-}
-
-// currentBranchBackground is the background of the rows of the checked out branch.
-func currentBranchBackground(dark bool) gfx.Color {
-	if dark {
-		return gfx.RGB(29, 35, 54)
-	}
-	return gfx.RGB(237, 243, 255)
 }
 
 // mergeForeground is the text color of a merge commit's row.
@@ -378,7 +332,9 @@ func tagIcon(b *gfx.PathBuilder, size float32) gfx.Path {
 }
 
 // paintLogRow paints row index of the commit list into rect, the rectangle its element was
-// laid out at: the graph, the subject, the author, the date and the reference labels.
+// laid out at, as SourceGit's Histories row does: the graph, one label per reference, the
+// subject, the author with a picture, the short hash and the author time. A row that is not
+// on the checked out branch is drawn at 65 percent, and the head's row is bold.
 func (a *App) paintLogRow(canvas *gfx.Canvas, rect gfx.Rect, index int) {
 	v := &a.logView
 	if a.project == nil || rect.Width <= 0 || rect.Height <= 0 {
@@ -388,76 +344,73 @@ func (a *App) paintLogRow(canvas *gfx.Canvas, rect gfx.Rect, index int) {
 	if index >= len(l.graph.Rows) {
 		return
 	}
-	dark := a.colors.Dark
-	color, dateWidth := a.graphColors(), v.dateColumn(canvas)
+	color := a.logView.lanes.of(l.graph.Rows, l.projGen)
+	styles := a.gitListPalette()
 	m := newGraphMetrics(canvas.PixelScale())
-	upstream := v.upstreams(l)
 	canvas.Clip(rect)
 	defer canvas.Unclip()
 	row := l.graph.Rows[index]
 	commit, _ := l.commit(row.CommitHash)
-	selected := row.CommitHash == l.selected
-	a.paintGraphRow(canvas, m, rect, row, color)
+	head := rowHasHead(row.Labels)
+	a.paintGraphRow(canvas, m, rect, row, color, styles, head, len(commit.ParentHashes) > 1)
 	if slot, ok := a.project.repositorySlot(a.project.logCommitRepo(row.CommitHash)); ok && a.project.workspaceMode() {
 		// As IDEA marks each commit with the color of its root, the strip at the left edge says which
 		// repository of the folder the commit belongs to, also while the log walks several at once.
-		canvas.Fill(gfx.Rect{X: rect.X, Y: rect.Y, Width: logRootStripWidth, Height: rect.Height}, repositoryColor(slot, dark))
+		canvas.Fill(gfx.Rect{X: rect.X, Y: rect.Y, Width: logRootStripWidth, Height: rect.Height}, repositoryColor(slot, a.colors.Dark))
 	}
 
-	foreground := a.colors.Text
-	if len(commit.ParentHashes) > 1 && !selected {
-		foreground = mergeForeground(dark)
+	// SourceGit dims a commit that is not merged into the checked out branch, and bolds the
+	// head's row; a selected row keeps the same text.
+	dim := float32(1)
+	if len(l.currentRows) > 0 && !l.currentRows[row.CommitHash] {
+		dim = 0.65
 	}
-	start := titleOffset(row)
-	labelsWidth := float32(0)
-	var group referenceGroup
-	var labelRect gfx.Rect
-	labelText := ""
+	text := styles.text.WithAlpha(dim)
+	weight := float32(gfx.WeightRegular)
+	if head {
+		weight = gfx.WeightBold
+	}
+	cols := logColumnsFor(rect.Width)
+	x := rect.X + titleOffset(row)
+	subjectRight := rect.X + cols.subjectRight
 	if l.decorations && len(row.Labels) > 0 {
-		group = groupReferences(row.Labels, l.current, upstream)
-		end := max(start, rect.Width-dateWidth-logMetaGap)
-		column := end - start
-		subject := canvas.TextWidth(commit.Subject, logFontSize)
-		available := max(0, min(column-subject, column/3))
-		icon := group.iconWidth(logRefSize + 3)
-		labelText = shortenTitle(canvas, group.title, available-icon-9, logRefSize)
-		textW := float32(0)
-		if labelText != "" {
-			textW = float32(math.Ceil(float64(canvas.TextWidth(labelText, logRefSize)))) + 1
-		}
-		width := min(column, icon+textW+8)
-		labelsWidth = width
-		labelRect = gfx.Rect{X: rect.X + end - width, Y: rect.Y, Width: width, Height: rect.Height}
+		// SourceGit gives the reference labels the row's room before the subject: a branch or
+		// tag name is only shortened when the whole column cannot hold it, and the subject is
+		// what gives way first.
+		x = a.paintLogRefs(canvas, rect, x, subjectRight, row.Labels, l.current, color(row.ColorID), styles, dim)
 	}
-	a.paintText(canvas, commit.Subject, gfx.Rect{X: rect.X + start, Y: rect.Y, Width: max(0, rect.Width-start-dateWidth-logMetaGap-labelsWidth), Height: rect.Height}, logFontSize, foreground, gfx.AlignStart)
-	a.paintText(canvas, commit.AuthorName, gfx.Rect{X: rect.X + max(0, rect.Width-dateWidth-112), Y: rect.Y, Width: logAuthorWidth, Height: rect.Height}, logMetaSize, foreground, gfx.AlignStart)
-	a.paintText(canvas, v.date(commit), gfx.Rect{X: rect.X + max(0, rect.Width-dateWidth-logDatePad), Y: rect.Y, Width: dateWidth, Height: rect.Height}, logMetaSize, foreground, gfx.AlignEnd)
-	if labelRect.Width > 0 {
-		background := a.colors.Ground
-		switch {
-		case selected:
-			background = a.colors.Selection
-		case l.currentRows[row.CommitHash]:
-			background = currentBranchBackground(dark)
+	subjectEnd := rect.X + cols.subjectRight
+	a.paintLogText(canvas, commit.Subject, gfx.Rect{X: x, Y: rect.Y, Width: max(0, subjectEnd-x), Height: rect.Height}, logFontSize, weight, false, text, gfx.AlignStart)
+	if cols.author {
+		authorEnd := rect.Width
+		if cols.date {
+			authorEnd = cols.dateX
 		}
-		a.paintLabels(canvas, labelRect, group, labelText, background)
+		if cols.sha {
+			authorEnd = cols.shaX
+		}
+		avatar := gfx.Rect{X: rect.X + cols.authorX + 4, Y: rect.Y + (rect.Height-logAvatarSize)/2, Width: logAvatarSize, Height: logAvatarSize}
+		a.paintAvatar(canvas, avatar, commit.AuthorName, dim)
+		a.paintLogText(canvas, commit.AuthorName, gfx.Rect{X: avatar.X + logAvatarSize + 4, Y: rect.Y, Width: max(0, rect.X+authorEnd-logColumnGap-(avatar.X+logAvatarSize+4)), Height: rect.Height}, logMetaSize, weight, false, text, gfx.AlignStart)
+	}
+	if cols.sha {
+		a.paintLogText(canvas, commit.ShortHash, gfx.Rect{X: rect.X + cols.shaX + logColumnGap, Y: rect.Y, Width: logShaColumn - 2*logColumnGap, Height: rect.Height}, logMetaSize, weight, true, text, gfx.AlignStart)
+	}
+	if cols.date {
+		a.paintLogText(canvas, v.date(commit), gfx.Rect{X: rect.X + cols.dateX + logColumnGap, Y: rect.Y, Width: logDateColumn - 2*logColumnGap, Height: rect.Height}, logMetaSize, weight, false, text, gfx.AlignStart)
 	}
 }
 
-// graphColors is the color of each color id of the graph in the current theme, cached.
-func (a *App) graphColors() func(int32) gfx.Color {
-	v, dark := &a.logView, a.colors.Dark
-	if v.colorsDark != dark || v.colors == nil {
-		v.colors, v.colorsDark = map[int32]gfx.Color{}, dark
+// paintLogText paints one column of a commit row cut to its rectangle with an ellipsis.
+func (a *App) paintLogText(canvas *gfx.Canvas, text string, rect gfx.Rect, size, weight float32, mono bool, color gfx.Color, align gfx.Alignment) {
+	if rect.Width <= 0 || text == "" {
+		return
 	}
-	return func(id int32) gfx.Color {
-		c, ok := v.colors[id]
-		if !ok {
-			c = graphColor(id, dark, a.colors.Text)
-			v.colors[id] = c
-		}
-		return c
+	line := canvas.FitLine(text, size, weight, rect.Width)
+	if line == "" {
+		return
 	}
+	canvas.LabelAligned(line, rect, gfx.TextStyle{Size: size, Weight: weight, Mono: mono, Color: color}, align)
 }
 
 // dateColumn is the width of the date column in the canvas's fonts, measured again when they
@@ -469,41 +422,134 @@ func (v *logView) dateColumn(canvas *gfx.Canvas) float32 {
 	return v.dateWidth
 }
 
-// paintGraphRow strokes the edges of one row and fills its node.
-func (a *App) paintGraphRow(canvas *gfx.Canvas, m graphMetrics, rect gfx.Rect, row core.GraphRow, color func(int32) gfx.Color) {
+// paintGraphRow strokes the edges of one row and draws its dot as SourceGit does: a normal
+// commit is a small ring, the head a large ring with a filled center, and a merge a large
+// filled dot crossed with the contents color.
+func (a *App) paintGraphRow(canvas *gfx.Canvas, m graphMetrics, rect gfx.Rect, row core.GraphRow, color func(int32) gfx.Color, styles gitListColors, head, merge bool) {
 	width := titleOffset(row)
 	box := gfx.Rect{X: rect.X, Y: rect.Y, Width: width, Height: logRowHeight}
 	for _, e := range row.PrintElements {
-		x0, y0, x1, y1 := m.line(e)
+		s := m.segment(e)
 		b := canvas.PathBuilder()
 		if e.IsDotted && !e.HasArrow {
-			dashLine(b, x0, y0, x1, y1)
+			if s.curved {
+				dashCurve(b, s)
+			} else {
+				dashLine(b, s.x0, s.y0, s.x1, s.y1)
+			}
 		} else {
-			b.MoveTo(x0, y0)
-			b.LineTo(x1, y1)
+			b.MoveTo(s.x0, s.y0)
+			if s.curved {
+				b.CubicTo(s.cx1, s.cy1, s.cx2, s.cy2, s.x1, s.y1)
+			} else {
+				b.LineTo(s.x1, s.y1)
+			}
 		}
 		if e.HasArrow {
-			length := max(1, float32(math.Hypot(float64(x1-x0), float64(y1-y0))))
-			vx := (x0 - x1) / length * logRowHeight * 0.3
-			vy := (y0 - y1) / length * logRowHeight * 0.3
+			length := max(1, float32(math.Hypot(float64(s.x1-s.x0), float64(s.y1-s.y0))))
+			vx := (s.x0 - s.x1) / length * logRowHeight * 0.3
+			vy := (s.y0 - s.y1) / length * logRowHeight * 0.3
 			for _, sign := range [2]float32{-1, 1} {
-				b.MoveTo(x1, y1)
-				b.LineTo(x1+vx*sqrt07-sign*vy*sqrt03, y1+sign*vx*sqrt03+vy*sqrt07)
+				b.MoveTo(s.x1, s.y1)
+				b.LineTo(s.x1+vx*sqrt07-sign*vy*sqrt03, s.y1+sign*vx*sqrt03+vy*sqrt07)
 			}
 		}
 		canvas.DrawPath(b.Path(width, logRowHeight), box, gfx.PathStyle{
 			Stroke: color(e.ColorID), StrokeWidth: m.lineWidth, Cap: gfx.CapRound, Join: gfx.JoinRound,
 		})
 	}
-	x := rect.X + m.laneCenter + float32(row.Lane)*m.laneSpacing - m.nodeRadius
-	node := gfx.Rect{X: x, Y: rect.Y + m.rowCenter - m.nodeRadius, Width: m.nodeDiameter, Height: m.nodeDiameter}
-	canvas.Rounded(node, m.nodeDiameter/2, color(row.ColorID))
+	centerX := rect.X + m.laneCenter + float32(row.Lane)*m.laneSpacing
+	centerY := rect.Y + m.rowCenter
+	lane := color(row.ColorID)
+	dot := func(radius float32) gfx.Rect {
+		return gfx.Rect{X: centerX - radius, Y: centerY - radius, Width: 2 * radius, Height: 2 * radius}
+	}
+	switch {
+	case head:
+		outer := dot(m.headRadius)
+		canvas.Rounded(outer, m.headRadius, styles.contents)
+		canvas.RoundedOutline(outer, m.headRadius, m.lineWidth, lane)
+		canvas.Rounded(dot(m.dotRadius), m.dotRadius, lane)
+	case merge:
+		canvas.Rounded(dot(m.headRadius), m.headRadius, lane)
+		cross := m.dotRadius
+		canvas.Fill(gfx.Rect{X: centerX - cross, Y: centerY - m.lineWidth/2, Width: 2 * cross, Height: m.lineWidth}, styles.contents)
+		canvas.Fill(gfx.Rect{X: centerX - m.lineWidth/2, Y: centerY - cross, Width: m.lineWidth, Height: 2 * cross}, styles.contents)
+	default:
+		inner := dot(m.dotRadius)
+		canvas.Rounded(inner, m.dotRadius, styles.contents)
+		canvas.RoundedOutline(inner, m.dotRadius, m.lineWidth, lane)
+	}
 }
 
 var (
 	sqrt07 = float32(math.Sqrt(0.7))
 	sqrt03 = float32(math.Sqrt(0.3))
 )
+
+// dashCurve traces a dotted lane change along its cubic with the pattern of dashLine: one
+// dash and one gap fitted into a row, the pattern starting half a dash in.
+func dashCurve(b *gfx.PathBuilder, s graphSegment) {
+	const samples = 24
+	type point struct{ x, y float32 }
+	var pts [samples + 1]point
+	total := float32(0)
+	for i := 0; i <= samples; i++ {
+		t := float32(i) / samples
+		u := 1 - t
+		x := u*u*u*s.x0 + 3*u*u*t*s.cx1 + 3*u*t*t*s.cx2 + t*t*t*s.x1
+		y := u*u*u*s.y0 + 3*u*u*t*s.cy1 + 3*u*t*t*s.cy2 + t*t*t*s.y1
+		pts[i] = point{x, y}
+		if i > 0 {
+			total += float32(math.Hypot(float64(x-pts[i-1].x), float64(y-pts[i-1].y)))
+		}
+	}
+	space := float32(logRowHeight/2 - 2)
+	length := total * 2
+	dash := length/max(1, float32(math.Floor(float64(length/logRowHeight)))) - space
+	if dash <= 0 {
+		b.MoveTo(s.x0, s.y0)
+		b.CubicTo(s.cx1, s.cy1, s.cx2, s.cy2, s.x1, s.y1)
+		return
+	}
+	drawing, penDown := true, false
+	remaining := dash / 2
+	for i := 1; i <= samples; i++ {
+		ax, ay := pts[i-1].x, pts[i-1].y
+		bx, by := pts[i].x, pts[i].y
+		segment := float32(math.Hypot(float64(bx-ax), float64(by-ay)))
+		if segment <= 0 {
+			continue
+		}
+		for pos := float32(0); pos < segment-0.001; {
+			step := min(remaining, segment-pos)
+			if step <= 0 {
+				break
+			}
+			x0, y0 := ax+(bx-ax)*pos/segment, ay+(by-ay)*pos/segment
+			x1, y1 := ax+(bx-ax)*(pos+step)/segment, ay+(by-ay)*(pos+step)/segment
+			if drawing {
+				if !penDown {
+					b.MoveTo(x0, y0)
+					penDown = true
+				}
+				b.LineTo(x1, y1)
+			} else {
+				penDown = false
+			}
+			pos += step
+			remaining -= step
+			if remaining <= 0.001 {
+				drawing = !drawing
+				if drawing {
+					remaining = dash
+				} else {
+					remaining, penDown = space, false
+				}
+			}
+		}
+	}
+}
 
 // dashLine traces a dotted edge as the IntelliJ log dashes it: one dash and one gap
 // fitted into a row, the pattern starting half a dash in.
@@ -586,19 +632,4 @@ func (v *logView) date(c core.GitCommit) string {
 	}
 	v.dates[c.Hash] = s
 	return s
-}
-
-// upstreams maps each local branch to the remote branch it tracks.
-func (v *logView) upstreams(l *gitLogState) map[string]string {
-	if v.upstreamFor == &l.sections[0] && v.upstreamRefs == len(l.sections[0].refs) && v.upstream != nil {
-		return v.upstream
-	}
-	v.upstream = map[string]string{}
-	for _, r := range l.sections[0].refs {
-		if r.UpstreamShortName != "" {
-			v.upstream[r.ShortName] = r.UpstreamShortName
-		}
-	}
-	v.upstreamFor, v.upstreamRefs = &l.sections[0], len(l.sections[0].refs)
-	return v.upstream
 }

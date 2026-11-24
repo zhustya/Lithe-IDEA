@@ -219,6 +219,8 @@ type worktreeView struct {
 	// hashWidth is the width of the short hash column in the fonts of hashFonts.
 	hashWidth float32
 	hashFonts uint32
+	// lanes assigns the History tab's graph lane colors.
+	lanes laneColors
 	// commit is the splitter between the Changes tab's list and its commit area.
 	commit commitView
 }

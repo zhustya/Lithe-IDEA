@@ -244,6 +244,12 @@ type GitMessages struct {
 	TagGroup             string
 	NoMatchingReferences string
 
+	// The column header above the commit list.
+	ColumnGraphSubject string
+	ColumnAuthor       string
+	ColumnSHA          string
+	ColumnAuthorTime   string
+
 	// The commit list's toolbar, filters and their popovers.
 	TextOrHash      string
 	FilterBranch    string

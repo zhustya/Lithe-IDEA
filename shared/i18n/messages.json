@@ -10433,6 +10433,34 @@
       ]
     },
     {
+      "id": "desktop.git.log.header.graphSubject",
+      "description": "Git Log: the header of the commit list's graph and subject column",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.git.log.header.author",
+      "description": "Git Log: the header of the commit list's author column",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.git.log.header.sha",
+      "description": "Git Log: the header of the commit list's SHA column",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.git.log.header.authorTime",
+      "description": "Git Log: the header of the commit list's author time column",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.git.pushAll.title",
       "description": "Push Commits dialog: the title",
       "platforms": [

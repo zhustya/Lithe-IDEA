@@ -638,7 +638,7 @@ func (a *App) paintWorktreeCommit(canvas *gfx.Canvas, rect gfx.Rect, index int) 
 	var labels []core.GraphLabel
 	if v.graphed && index < len(h.graph.Rows) && h.graph.Rows[index].CommitHash == commit.Hash {
 		row := h.graph.Rows[index]
-		a.paintGraphRow(canvas, newGraphMetrics(canvas.PixelScale()), rect, row, a.graphColors())
+		a.paintGraphRow(canvas, newGraphMetrics(canvas.PixelScale()), rect, row, v.lanes.of(h.graph.Rows, 0), a.gitListPalette(), rowHasHead(row.Labels), len(commit.ParentHashes) > 1)
 		start, labels = titleOffset(row), row.Labels
 	}
 	foreground := a.colors.Text
