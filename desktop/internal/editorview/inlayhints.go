@@ -448,20 +448,13 @@ func wrapLineWithHints(dst []wrapRow, text string, hints []preparedInlayHint, co
 }
 
 func (v *View) paintSingleHint(canvas *gfx.Canvas, h *preparedInlayHint, shift int, y float32, look Look) {
-	tint := look.Foreground
-	pillBg, pillBorder := tint, tint
-	pillBg.Alpha, pillBorder.Alpha = 0.07, 0.13
+	// A hint is virtual text, not a field: it uses the muted line-number color at the
+	// editor font's size, with no pill, border or per-token tint. The tooltip still marks
+	// an interactive hint and the text stays legible in both themes.
 	fg := look.Subtle
-	fg.Alpha = 1
 
 	textX := v.textLeft + float32(h.cell+h.padLeft-shift)*v.cellW - v.scrollX
 	textWidth := float32(h.textCells) * v.cellW
-	height := max(min(v.cellH+2, v.lineH-2), 1)
-	top := y + (v.lineH-height)/2
-	pill := gfx.Rect{X: textX - 2, Y: top, Width: textWidth + 4, Height: height}
-	canvas.Fill(pill, pillBg)
-	canvas.Fill(gfx.Rect{X: pill.X, Y: pill.Y, Width: pill.Width, Height: 1}, pillBorder)
-	canvas.Fill(gfx.Rect{X: pill.X, Y: pill.Y + pill.Height - 1, Width: pill.Width, Height: 1}, pillBorder)
 
 	runs := v.inlayRuns[:len(h.runs)]
 	copy(runs, h.runs)
