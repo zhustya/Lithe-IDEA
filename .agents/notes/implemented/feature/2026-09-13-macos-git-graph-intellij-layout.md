@@ -2,6 +2,11 @@
 
 状态：已实现
 
+> 2026-11-24 呈现调整：Log 的提交列表与提交图已按 SourceGit 的外观重做（内容色、列标题、描边引用标签、头像、SHA 列、lane 调色板与圆点），见
+> [`2026-11-24-git-log-sourcegit-presentation.md`](2026-11-24-git-log-sourcegit-presentation.md)。本文关于 Core 图拓扑、提交顺序、稳定颜色 ID 和长边处理的决策仍然有效；本文中“宿主按 IDEA hue 上色”和“当前分支底色”两段只描述迁移前的呈现，不再是当前规则。
+>
+> 2026-11-24 分列调整：Core 的 `git.graphProjection` 默认改为 `laneMode: "stable"`，每条分支线从分叉到结束固定占一列，分支结束后列才复用；`laneMode: "compact"` 保留本文的 IDEA 压缩列作为兼容或对照。规则与验证见 Core 仓库 `rust/contracts/rust-core-api.md` 和 `rust/crates/git/src/graph.rs`。
+
 > 2026-11-08 Viva 迁移：本文的图算法决策仍然有效，图投影已由 Rust Core 的 `git.graphProjection` 提供，Viva 调用它并绘制历史列表。原 macOS 界面的像素、交互和测试记录属于迁移前的 Swift 客户端，已从本文删除；Viva 的完整交互和像素级一致性尚未重新验收。
 
 关联需求：[Issue #410](https://github.com/1lck/Lithe-IDEA/issues/410)。
