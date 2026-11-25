@@ -460,11 +460,11 @@ func (v *View) paintSingleHint(canvas *gfx.Canvas, h *preparedInlayHint, shift i
 
 	textX := v.textLeft + float32(h.cell+h.padLeft-shift)*v.cellW - v.scrollX
 	textWidth := float32(h.textCells) * v.cellW
-	height := max(min(v.cellH+4, v.lineH-2), 1)
+	height := max(min(v.cellH+2, v.lineH-2), 1)
 	top := y + (v.lineH-height)/2
-	const padX = 5
+	const padX = 4
 	pill := gfx.Rect{X: textX - padX, Y: top, Width: textWidth + 2*padX, Height: height}
-	canvas.Rounded(pill, height/2, background)
+	canvas.Rounded(pill, min(5, height/2), background)
 
 	runs := v.inlayRuns[:len(h.runs)]
 	copy(runs, h.runs)
