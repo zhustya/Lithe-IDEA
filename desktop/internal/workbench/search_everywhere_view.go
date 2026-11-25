@@ -74,7 +74,12 @@ func (a *App) everywherePopup(c ui.C) {
 			}
 			switch {
 			case (s.loading || a.everywhereSymbolsLoading(p)) && len(s.matches) == 0:
-				ui.Text(c, i18n.Shared(language, "quickOpen.searching")).Muted()
+				ui.Column(c).Gap(6).Children(func() {
+					ui.Text(c, i18n.Shared(language, "quickOpen.searching")).Muted()
+					if p.search.warming > 0 {
+						ui.Text(c, i18n.Shared(language, "desktop.search.indexing")).FontSize(11).Muted()
+					}
+				})
 			case s.failed && len(s.matches) == 0:
 				ui.Row(c).Gap(8).Items(ui.Center).Children(func() {
 					ui.Text(c, i18n.Shared(language, "search.failed")).Color(a.theme.Danger)

@@ -226,6 +226,7 @@ type Kernel interface {
 	SearchWorkspace(ctx context.Context, request core.WorkspaceSearchRequest) ([]core.WorkspaceSearchMatch, error)
 	SearchWorkspacePage(ctx context.Context, request core.WorkspaceSearchRequest) (core.WorkspaceSearchPage, error)
 	InvalidateWorkspaceSearch(ctx context.Context, root string) error
+	WarmWorkspaceSearch(ctx context.Context, root string, maxFileBytes uint64, includeIgnored bool) (core.SearchIndexStatus, error)
 	FilterWorkspaceChanges(ctx context.Context, paths []string) ([]string, error)
 	UpdateWorkspaceSearch(ctx context.Context, root string, paths []string) error
 	SearchEverywherePage(ctx context.Context, request core.EverywhereSearchRequest) (core.EverywhereSearchPage, error)

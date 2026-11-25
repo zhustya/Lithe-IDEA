@@ -38,6 +38,17 @@ Core 解析的路径/glob 表达式；没有模块模型时不执行模块查询
 直接枚举文件并匹配当前页，不等所有文件建立三元组倒排表后才显示首屏。
 旧侧栏在首次查询时强制构建全文索引，导致同一查询比双 Shift 明显更慢；
 不要把主动预热或旧同步消费者的索引构建放回交互式分页的必经路径。
+
+首屏查询发起的同时，宿主为该可见性变体在后台调用一次
+`workspace.searchIndex.warm`，把全文索引建起来；分页本身仍不等它。索引就绪
+后，同一查询若还在等（冷扫描超时）会自动重查，之后的页面用三元组收窄候选。
+不阻塞首屏，但代价是首屏扫描与索引构建并行读盘：项目越大，会话里的第一次
+查询越可能变慢甚至超时，之后同变体查询是毫秒级。索引在关闭项目时释放，
+不会跨项目常驻。状态行在构建期间显示“正在建立搜索索引”，超时页保持“搜索中”
+而不是先报失败。一个变体只建一次；打开“包含 Git 忽略”或“跟随符号链接”等
+改变索引键的选项后，该变体回退到文件清单扫描，不假装已预热。
+不在项目打开时预热：搜索面板尚未使用时读整个工作区属于为未使用的功能预先
+启动，违反资源规则。
 文件标题与命中行统一为24pt，文件名只在标题显示一次，命中行缩进并对齐
 行列号与正文。两种搜索结果的正文高亮均使用主题的13pt界面字体，避免与文件名
 切换字体；编辑器预览仍遵循编辑器自己的字体设置。
@@ -73,6 +84,12 @@ Core 解析的路径/glob 表达式；没有模块模型时不执行模块查询
 - 项目搜索继续列出文件名匹配、只是排在内容行之后：Core 先收集文件名匹配，文件名
   含查询词的文件一多就占满 200 条上限，内容行一条都不剩；IDE 的 Find in Files
   也不列文件名，查文件名用全局搜索的“文件”。被否。
+- 在项目打开或应用启动时预热全文索引：搜索面板还没被使用就读取整个工作区，
+  是为未使用的功能预先启动，并和用户打开项目后的第一次编辑、构建争抢磁盘；
+  改为首次查询时在后台预热。被否。
+- 非 ASCII 查询继续不锚定三元组：中文注释里的词只能逐文件读取，20k 文件、
+  1.5 GB 的工作区单次要十几秒；索引本来就按字节存小写三元组，非 ASCII 文本
+  与 ASCII 走同一张倒排表，没有理由排除。已改为三个字节以上一律锚定。
 
 ## 后果
 
@@ -104,10 +121,21 @@ Enum、Interface、Struct，其余作为符号。界面字体统一为13pt，侧
 名称匹配的宽松规则限于 Search Everywhere，通用 `rankNames` 保持原有边界匹配，
 避免插件市场等现有候选列表出现额外结果。
 
+同机实测（Windows、release Core、`D:\hm\PUS`，20,528 个文件、1.9 GB）：
+全文索引构建 2–4 分钟、进程常驻内存约 250 MB；构建后常见标识符分页 1.6–3 ms，
+中文“推进器”从 12.5 s 降到 11–27 ms，完整计数从 14.3 s 降到 1.4 ms。冷分页
+（没有现成索引）仍可能 6–113 s，取决于查询和文件缓存；这是不在项目打开时
+预热的代价，也是首次查询可能超时的原因。点击搜索结果打开文件时，目标行滚到
+编辑器中间并淡出高亮约 0.9 s，跳转不再只落在视口边缘。
+
 ## 验证
 
 - `scripts/desktop/desktop-go.sh test ./internal/core -run TestWorkspaceSearchUsesCoreOptionsAndRefreshesChanges`：实际 Core 搜索、过滤和增量更新。
 - `scripts/desktop/desktop-go.sh test ./internal/workbench -run TestProjectSearch`：界面输入、选项、结果跳转、原生监听外部变化、索引复用、刷新和过期查询串行。
+- `scripts/desktop/desktop-go.sh test ./internal/workbench -run 'TestProjectSearchWarmsTheContentIndexOncePerVariant|TestProjectSearchRetriesAPageThatOutlivedTheIndexBuild|TestProjectSearchCentersTheOpenedLine'`：后台预热只建一次、超时页在索引就绪后重查、点击结果把目标行居中。
+- `scripts/desktop/desktop-go.sh test ./internal/core -run 'TestWarmWorkspaceSearchBuildsTheContentIndex|TestSearchCountsAndLanguageDiscoverySharedFixture'`：预热命令建出三元组倒排，计数与分页一致。
+- `scripts/desktop/desktop-go.sh test ./internal/editorview -run TestFlashLine`：跳转高亮约一秒后淡出，并只在自己需要时请求帧。
+- `LITHE_SEARCH_BENCH_ROOT=<真实工作区> LITHE_SEARCH_BENCH_QUERY=<查询> scripts/desktop/desktop-go.sh test ./internal/core -run '^$' -bench BenchmarkWorkspaceColdContentSearch -benchtime=1x`：同一工作区的冷分页、构建后分页和完整计数；用于大型项目和中文查询的前后对比。
 - `scripts/desktop/desktop-go.sh test ./internal/core ./internal/workbench -run TestEverywhere`：共享排序 fixture、分页、选择打开、文本变化监听、输入法组合和过期请求。
 - `scripts/desktop/desktop-go.sh test ./internal/workbench -run TestSearchPanels`：两个搜索界面共享监听并在最后一个消费者关闭时释放。
 - `scripts/desktop/desktop-go.sh test ./internal/core -run '^$' -bench '^BenchmarkWorkspaceSearchIndex$' -benchtime=3x`：索引复用与重建开销。
@@ -121,6 +149,10 @@ Enum、Interface、Struct，其余作为符号。界面字体统一为13pt，侧
 ## 适用范围
 
 - `desktop/internal/core/workspace.go`
+- `desktop/internal/core/workspace_warm_test.go`
+- `desktop/internal/core/workspace_search_latency_test.go`
 - `desktop/internal/workbench/search.go`
 - `desktop/internal/workbench/search_everywhere.go`
 - `desktop/internal/editorview/view.go`
+- `desktop/internal/editorview/flash.go`
+- Lithe-core-rust `rust/crates/project/src/search_index.rs`、`rust/crates/project/src/files/search.rs`

@@ -238,6 +238,8 @@ func (a *App) updateEverywhere(p *project, query string, scope int) {
 		IncludeIgnored: options.includeIgnored, IncludeGenerated: options.includeGenerated, FollowSymlinks: options.followSymlinks,
 	}
 	s.loading = true
+	a.startSearchWarm(p, searchQuery{includeIgnored: options.includeIgnored,
+		includeGenerated: options.includeGenerated, followSymlinks: options.followSymlinks})
 	if !s.watchAttached {
 		a.startEverywhereWatch(p)
 	}
@@ -399,6 +401,10 @@ func (a *App) finishEverywhere(p *project, generation uint64, next bool, page co
 	s.loading = false
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
+			if p.search.warming > 0 && errors.Is(err, context.DeadlineExceeded) {
+				s.loading = true
+				return
+			}
 			s.failed = true
 			a.operationFailed("workspace_search_everywhere", err)
 		}

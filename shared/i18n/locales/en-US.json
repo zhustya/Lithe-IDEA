@@ -11672,6 +11672,7 @@
     "desktop.search.counting": "Counting all matches…",
     "desktop.search.followSymlinks": "Follow symbolic links",
     "desktop.search.includeGenerated": "Include generated directories",
+    "desktop.search.indexing": "Building the search index…",
     "desktop.search.symlinkHelp": "Only targets inside this project are searched; cycles are skipped.",
     "desktop.search.totalCount": "{count} occurrences in {files} files"
   },

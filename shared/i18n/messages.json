@@ -110090,6 +110090,13 @@
       ]
     },
     {
+      "id": "desktop.search.indexing",
+      "description": "Workspace search content index building status",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.search.symlinkHelp",
       "description": "Desktop project search options and complete totals",
       "platforms": [

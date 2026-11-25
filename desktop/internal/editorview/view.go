@@ -238,6 +238,8 @@ type View struct {
 	scroll, scrollX float32
 	// reveal asks the next paint to scroll the caret into view.
 	reveal bool
+	// flash fades a band over the line a navigation arrived on; see flash.go.
+	flash lineFlash
 	// The geometry of the last paint, which the pointer and the text input use. textRight is
 	// where the text ends: at the minimap while it shows, else at the view's right edge.
 	area                gfx.Rect

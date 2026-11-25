@@ -72,7 +72,12 @@ func (a *App) searchPanel(c ui.C) {
 				ui.Text(c, i18n.Shared(language, "native.searchAcrossTheProject")).Color(a.colors.Subtle)
 			})
 		case p.search.loading && len(p.search.matches) == 0:
-			ui.Column(c).Fill().Center().Children(func() { ui.Text(c, i18n.Shared(language, "quickOpen.searching")).Muted() })
+			ui.Column(c).Fill().Center().Gap(6).Children(func() {
+				ui.Text(c, i18n.Shared(language, "quickOpen.searching")).Muted()
+				if p.search.warming > 0 {
+					ui.Text(c, i18n.Shared(language, "desktop.search.indexing")).FontSize(11).Muted()
+				}
+			})
 		case p.search.failed && len(p.search.matches) == 0:
 			ui.Column(c).Fill().Center().Children(func() {
 				ui.Text(c, i18n.Shared(language, "search.failed")).Color(a.theme.Danger)
@@ -130,6 +135,9 @@ func (a *App) searchResults(c ui.C, p *project, language i18n.Language) {
 	}
 	ui.Row(c).FillWidth().PadX(11).Gap(8).Items(ui.Center).Children(func() {
 		ui.Text(c, summary).FontSize(12).Color(a.colors.Subtle)
+		if p.search.warming > 0 {
+			ui.Text(c, i18n.Shared(language, "desktop.search.indexing")).FontSize(11).Muted()
+		}
 		if p.search.countCancel != nil {
 			ui.Text(c, i18n.Shared(language, "desktop.search.counting")).FontSize(11).Muted()
 		}

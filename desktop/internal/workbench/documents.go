@@ -185,6 +185,9 @@ type documentLocation struct {
 	line      int
 	column    int
 	columnSet bool
+	// reveal centers the line and flashes it once the document is there, so the arrival of a
+	// search result is visible instead of leaving the target at the edge of the view.
+	reveal bool
 	// group is the editor group the file opens in when it is still there; "" opens it
 	// where files open (placeEditorMember). A restored session sets it (editor_session.go).
 	group string
@@ -353,6 +356,10 @@ func (a *App) openFile(p *project, path string) {
 				} else if location.line > 0 {
 					d.view.GoToLine(location.line)
 				}
+				if location.reveal {
+					// Both forms store a one-based line; the editor counts from zero.
+					a.revealDocumentLine(d, max(location.line-1, 0))
+				}
 			}
 		}
 	})
@@ -382,6 +389,13 @@ func (a *App) openFileAt(p *project, path string, line int) {
 // A file that is already open is selected and its caret moved without reading
 // it again.
 func (a *App) openFileAtPosition(p *project, path string, line, column int) {
+	a.openFileAtPositionRevealed(p, path, line, column, false)
+}
+
+// openFileAtPositionRevealed is openFileAtPosition for a navigation whose arrival should be
+// visible: the editor centers the line and flashes it, in this paint for a file that is already
+// open and once the file has been read for one that is not.
+func (a *App) openFileAtPositionRevealed(p *project, path string, line, column int, reveal bool) {
 	if path == "" {
 		return
 	}
@@ -390,13 +404,26 @@ func (a *App) openFileAtPosition(p *project, path string, line, column int) {
 	if d := p.docs.byPath(path); d != nil {
 		a.selectDocument(p, d.id)
 		d.view.GoToNavigation(line, column, false)
+		if reveal {
+			a.revealDocumentLine(d, line)
+		}
 		return
 	}
 	if p.docs.locations == nil {
 		p.docs.locations = make(map[string]documentLocation)
 	}
-	p.docs.locations[path] = documentLocation{line: line + 1, column: column, columnSet: true}
+	p.docs.locations[path] = documentLocation{line: line + 1, column: column, columnSet: true, reveal: reveal}
 	a.openFile(p, path)
+}
+
+// revealDocumentLine makes a navigation's target obvious: the line is scrolled to the middle of
+// the editor, as far as the scroll reaches, and flashes once.
+func (a *App) revealDocumentLine(d *document, line int) {
+	if d == nil {
+		return
+	}
+	d.view.CenterLine(line)
+	d.view.FlashLine(line)
 }
 
 // readDocument reads an editor file and asks Core to classify its complete

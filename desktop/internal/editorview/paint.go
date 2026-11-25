@@ -112,6 +112,7 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 	bottom := area.Y + area.Height
 	v.numbers = v.numbers[:0]
 	v.paintHighlights(canvas, v.textRight, firstLine, lastLine)
+	v.paintFlash(canvas, look, firstLine, lastLine)
 	canvas.Clip(textArea)
 	annotation := 0
 	top := area.Y + float32(firstRow-firstSub)*v.lineH - v.scroll

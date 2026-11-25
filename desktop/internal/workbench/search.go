@@ -27,6 +27,13 @@ const (
 	searchTimeout      = 30 * time.Second
 	searchEventLimit   = 4096
 	searchUpdateLimit  = 512
+	// searchWarmTimeout bounds building the content index a search page narrows
+	// candidates with. A large workspace is read once, so it gets longer than one
+	// request: minutes on a workspace of gigabytes, not seconds.
+	searchWarmTimeout = 10 * time.Minute
+	// searchCountDelay lets a burst of typing replace a query before the workspace
+	// is scanned for its totals.
+	searchCountDelay = 400 * time.Millisecond
 )
 
 // The two ways a directory watch stops keeping the project tree or a search index up to date
@@ -103,6 +110,12 @@ type projectSearch struct {
 	fullResync             bool
 	pending                []string
 	done                   <-chan struct{}
+	// warmNeeded are the option variants whose content index should be built once the current
+	// page has answered, warmStarted the ones already building or built, and warming counts the
+	// builds still running.
+	warmNeeded  map[bool]searchQuery
+	warmStarted map[bool]bool
+	warming     int
 }
 
 func (a *App) cancelProjectSearch(p *project) {
@@ -257,6 +270,7 @@ func (a *App) updateProjectSearch(p *project, query searchQuery) {
 		return
 	}
 	s.loading = true
+	a.startSearchWarm(p, query)
 	wasAttached := s.watchAttached
 	s.watchAttached = true
 	if !wasAttached && s.watchReady && !s.watchAvailable && s.watch != nil {
@@ -272,6 +286,65 @@ func (a *App) updateProjectSearch(p *project, query searchQuery) {
 	if !s.running && s.watchReady {
 		a.runProjectSearch(p)
 	}
+}
+
+// startSearchWarm begins building Core's content search index for the query's visibility
+// variant, once per variant and project. Interactive pages narrow the files they read with its
+// trigrams, which is what makes a rare query take milliseconds instead of minutes; they never
+// build it themselves, because that would read the whole workspace before the first result.
+func (a *App) startSearchWarm(p *project, query searchQuery) {
+	s := &p.search
+	if s.warmStarted[query.includeIgnored] || p.ctx == nil {
+		return
+	}
+	// The warm request carries the file budget and the include-ignored option, which are what
+	// Core's index key covers. Generated folders and internal links change the key in ways the
+	// request cannot express, so those variants keep the names-only path.
+	if query.followSymlinks || query.includeGenerated {
+		return
+	}
+	if s.warmStarted == nil {
+		s.warmStarted = make(map[bool]bool)
+	}
+	s.warmStarted[query.includeIgnored] = true
+	s.warming++
+	s.indexUsed = true
+	root, maxFileBytes := p.root, a.searchPreferences.MaxFileBytes
+	a.background(p, searchWarmTimeout, func(ctx context.Context) func(*App) {
+		_, err := a.kernel.WarmWorkspaceSearch(ctx, root, maxFileBytes, query.includeIgnored)
+		if ctx.Err() != nil {
+			// The project is closing (or the build ran past its bound) and the caller that
+			// drops Core's index may already have run, so drop whatever this build published
+			// so a closed project does not keep its index resident.
+			drop, cancel := context.WithTimeout(context.Background(), kernelCallTimeout)
+			defer cancel()
+			if dropErr := a.kernel.InvalidateWorkspaceSearch(drop, root); dropErr != nil && !errors.Is(dropErr, context.Canceled) {
+				a.backgroundFailedIn(drop, "workspace_search_cleanup", dropErr)
+			}
+			return nil
+		}
+		return func(a *App) {
+			s.warming = max(s.warming-1, 0)
+			if err != nil {
+				if !errors.Is(err, context.Canceled) {
+					a.backgroundFailed("workspace_search_index_warm", err)
+					// A search that waited for the index must not stay loading forever.
+					if s.loading && !s.running {
+						s.loading, s.failed = false, true
+					}
+				}
+				return
+			}
+			// A page that ran while the index was building scanned the whole workspace, or ran
+			// past its bound; without this the user has to type again to see the result.
+			if s.loading && s.watchReady && !s.running && strings.TrimSpace(s.want.text) != "" {
+				a.runProjectSearch(p)
+			}
+			if e := &p.everywhere; a.everywhereView.open && e.loading && !e.running && strings.TrimSpace(e.query) != "" {
+				a.runEverywhere(p, false)
+			}
+		}
+	})
 }
 
 func (a *App) refreshProjectSearch(p *project) {
@@ -424,6 +497,17 @@ func (a *App) countProjectSearch(p *project, request core.WorkspaceSearchRequest
 		defer cancel()
 		stop := context.AfterFunc(deadline, cancel)
 		defer stop()
+		// A burst of typing replaces the query before this scan starts; there is no point
+		// reading the workspace for totals of a query that is already gone.
+		if searchCountDelay > 0 {
+			timer := time.NewTimer(searchCountDelay)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				return nil
+			}
+		}
 		counts, err := core.NewClient().CountWorkspaceSearch(ctx, request)
 		return func(a *App) {
 			if generation != p.search.generation || countRevision != p.search.countRevision {
@@ -529,6 +613,13 @@ func (a *App) finishProjectSearch(p *project, generation uint64, matches []core.
 		if errors.Is(err, context.Canceled) {
 			return
 		}
+		// A cold page scan can run past its bound on a large workspace while the content
+		// index it competes with is still building; the build retries it, so the user sees
+		// the search still running instead of a failure that fixes itself moments later.
+		if s.warming > 0 && errors.Is(err, context.DeadlineExceeded) {
+			s.loading = true
+			return
+		}
 		s.failed = true
 		a.operationFailed("workspace_search", err)
 		return
@@ -550,15 +641,16 @@ func (a *App) openSearchResult(p *project, result core.WorkspaceSearchMatch) {
 		return
 	}
 	if result.Line != nil && len(result.ContentMatchRanges) > 0 {
-		// The caret goes to the match itself, not only its line.
-		a.openFileAtPosition(p, path, *result.Line-1, result.ContentMatchRanges[0].Start)
+		// The caret goes to the match itself, not only its line, and the arrival is revealed:
+		// the line is centered and flashes once.
+		a.openFileAtPositionRevealed(p, path, *result.Line-1, result.ContentMatchRanges[0].Start, true)
 		return
 	}
-	line := 0
 	if result.Line != nil {
-		line = *result.Line
+		a.openFileAtPositionRevealed(p, path, *result.Line-1, 0, true)
+		return
 	}
-	a.openFileAt(p, path, line)
+	a.openFileAt(p, path, 0)
 }
 
 // searchMatchColumn is the one-based column of a content match's first hit, or 0.

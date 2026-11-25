@@ -498,3 +498,27 @@ func (c *Client) UpdateWorkspaceSearch(ctx context.Context, root string, paths [
 		Paths []string `json:"paths"`
 	}{root, paths}, nil)
 }
+
+// SearchIndexStatus reports what Core holds in a workspace's content search
+// index: the files it covers and the trigram postings it built.
+type SearchIndexStatus struct {
+	FileCount    int  `json:"fileCount"`
+	SymbolCount  int  `json:"symbolCount"`
+	PostingCount int  `json:"postingCount"`
+	Rebuilt      bool `json:"rebuilt"`
+}
+
+// WarmWorkspaceSearch builds Core's content search index, so interactive
+// search pages can narrow candidates with its trigrams instead of reading
+// every file of the workspace. It reads the workspace once and blocks until
+// the index exists; run it away from the window thread and give it more time
+// than one request allows on a large workspace.
+func (c *Client) WarmWorkspaceSearch(ctx context.Context, root string, maxFileBytes uint64, includeIgnored bool) (SearchIndexStatus, error) {
+	var status SearchIndexStatus
+	err := c.Execute(ctx, "workspace.searchIndex.warm", struct {
+		Root           string `json:"root"`
+		MaxFileBytes   uint64 `json:"maxFileBytes,omitempty"`
+		IncludeIgnored bool   `json:"includeIgnored,omitempty"`
+	}{root, maxFileBytes, includeIgnored}, &status)
+	return status, err
+}

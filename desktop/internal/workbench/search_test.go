@@ -109,6 +109,150 @@ func TestProjectSearchFindsLinesInEveryFileTheEditorOpens(t *testing.T) {
 	}
 }
 
+// A result far down a file scrolls its line to the middle of the editor, and flashes it, so the
+// jump reads as a jump; revealing the line only as far as the view requires left it on the last
+// row, which the reader had to hunt for.
+func TestProjectSearchCentersTheOpenedLine(t *testing.T) {
+	h := newHarness(t, &testKernel{Client: core.NewClient()})
+	h.app.searchView.delay = 0
+	root := t.TempDir()
+	var text strings.Builder
+	for line := 1; line <= 400; line++ {
+		fmt.Fprintf(&text, "line %d\n", line)
+	}
+	path := filepath.Join(root, "far.txt")
+	if err := os.WriteFile(path, []byte(text.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.open(root)
+	p := h.app.project
+	line := 200
+	h.app.openSearchResult(p, core.WorkspaceSearchMatch{
+		Kind: "content", Path: "far.txt", Line: &line,
+		ContentMatchRanges: []core.SearchNameRange{{Start: 0, Length: 4}},
+	})
+	h.await("far.txt opens", func() bool { return p.docs.byPath(path) != nil })
+	h.settle()
+	d := p.docs.byPath(path)
+	editor := editorRect(h, d)
+	if editor.Height <= 0 {
+		t.Fatal("the editor declared no area")
+	}
+	// The editor's center is the middle of its laid-out area; LineTop counts from the page's
+	// top, so the target's center should land on the editor's.
+	center := editor.Y + editor.Height/2
+	got := d.view.LineTop(line-1) + d.view.LineHeight()/2
+	if tolerance := 2 * d.view.LineHeight(); got < center-tolerance || got > center+tolerance {
+		t.Fatalf("the target line is at %v, want the middle of the editor at %v", got, center)
+	}
+}
+
+// The content index is built once per visibility variant, at the query that needs it, and a page
+// that timed out while the build was in flight is retried when the build finishes.
+func TestProjectSearchWarmsTheContentIndexOncePerVariant(t *testing.T) {
+	k := &warmSearchKernel{testKernel: &testKernel{Client: core.NewClient()}}
+	h := newHarness(t, k)
+	h.app.searchView.delay = 0
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.open(root)
+	p := h.app.project
+	h.app.updateProjectSearch(p, searchQuery{text: "needle"})
+	awaitDocumentState(t, h, func() bool { return !p.search.loading && len(p.search.matches) > 0 })
+	h.settle()
+	if warmed := k.warmed.Load(); warmed != 1 {
+		t.Fatalf("the content index was warmed %d times, want one", warmed)
+	}
+	if k.includeIgnored.Load() {
+		t.Fatal("the include-ignored variant was warmed for a default query")
+	}
+	// A second query of the same variant does not build the index again.
+	h.app.updateProjectSearch(p, searchQuery{text: "needle 2"})
+	awaitDocumentState(t, h, func() bool { return !p.search.loading })
+	h.settle()
+	if warmed := k.warmed.Load(); warmed != 1 {
+		t.Fatalf("a second query warmed the content index again (%d builds)", warmed)
+	}
+}
+
+// A page that runs past its bound while the content index is still building keeps the search
+// running instead of failing, and the build's completion re-runs it.
+func TestProjectSearchRetriesAPageThatOutlivedTheIndexBuild(t *testing.T) {
+	k := &warmingSearchKernel{testKernel: &testKernel{Client: core.NewClient()}, release: make(chan struct{}), first: make(chan struct{}, 1)}
+	h := newHarness(t, k)
+	h.app.searchView.delay = 0
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.open(root)
+	p := h.app.project
+	h.app.updateProjectSearch(p, searchQuery{text: "needle"})
+	h.await("the first page to run", func() bool {
+		select {
+		case <-k.first:
+			return true
+		default:
+			return false
+		}
+	})
+	h.await("the first page to time out", func() bool { return !p.search.running && p.search.loading })
+	if p.search.failed {
+		t.Fatal("a page that timed out during the index build was reported as a failure")
+	}
+	close(k.release)
+	h.await("the retried page", func() bool { return !p.search.loading && len(p.search.matches) == 1 })
+	if p.search.failed {
+		t.Fatal("the retried page failed")
+	}
+}
+
+type warmSearchKernel struct {
+	*testKernel
+	warmed         atomic.Int32
+	includeIgnored atomic.Bool
+}
+
+func (k *warmSearchKernel) WarmWorkspaceSearch(_ context.Context, _ string, _ uint64, includeIgnored bool) (core.SearchIndexStatus, error) {
+	k.warmed.Add(1)
+	k.includeIgnored.Store(includeIgnored)
+	return core.SearchIndexStatus{FileCount: 1}, nil
+}
+
+// warmingSearchKernel keeps the index build in flight until the test releases it, and fails the
+// page that runs before the build finishes.
+type warmingSearchKernel struct {
+	*testKernel
+	release chan struct{}
+	first   chan struct{}
+	pages   atomic.Int32
+}
+
+func (k *warmingSearchKernel) WarmWorkspaceSearch(ctx context.Context, _ string, _ uint64, _ bool) (core.SearchIndexStatus, error) {
+	select {
+	case <-k.release:
+	case <-ctx.Done():
+		return core.SearchIndexStatus{}, ctx.Err()
+	}
+	return core.SearchIndexStatus{FileCount: 1}, nil
+}
+
+func (k *warmingSearchKernel) SearchWorkspacePage(context.Context, core.WorkspaceSearchRequest) (core.WorkspaceSearchPage, error) {
+	if k.pages.Add(1) == 1 {
+		select {
+		case k.first <- struct{}{}:
+		default:
+		}
+		return core.WorkspaceSearchPage{}, context.DeadlineExceeded
+	}
+	line := 1
+	return core.WorkspaceSearchPage{Matches: []core.WorkspaceSearchMatch{
+		{Kind: "content", Path: "a.txt", Line: &line},
+	}}, nil
+}
+
 type delayedSearchKernel struct {
 	*testKernel
 	started chan string

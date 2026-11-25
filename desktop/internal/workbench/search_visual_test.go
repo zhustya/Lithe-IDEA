@@ -3,6 +3,7 @@
 package workbench
 
 import (
+	"fmt"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
@@ -103,6 +104,29 @@ func TestVisualSearchResults(t *testing.T) {
 					if err := session.Screenshot(filepath.Join(out, tab.name+"-"+language+"-"+theme+".png")); err != nil {
 						t.Fatal(err)
 					}
+				}
+				// A result far down a file is centered and flashes once, so the jump is visible
+				// instead of leaving the target on the last row of the view.
+				h.app.closeEverywhere(p)
+				far := filepath.Join(root, "long.txt")
+				var lines []byte
+				for line := 1; line <= 400; line++ {
+					lines = fmt.Appendf(lines, "line %d\n", line)
+				}
+				if err := os.WriteFile(far, lines, 0600); err != nil {
+					t.Fatal(err)
+				}
+				matchLine := 300
+				h.app.openSearchResult(p, core.WorkspaceSearchMatch{Kind: "content", Path: "long.txt", Line: &matchLine,
+					ContentMatchRanges: []core.SearchNameRange{{Start: 0, Length: 4}}})
+				h.await("the target file", func() bool { return p.docs.byPath(far) != nil })
+				h.settle()
+				h.app.invalidator.Invalidate()
+				if err := h.driver.Pump(); err != nil {
+					t.Fatal(err)
+				}
+				if err := session.Screenshot(filepath.Join(out, "search-jump-flash-"+language+"-"+theme+".png")); err != nil {
+					t.Fatal(err)
 				}
 			})
 		}
