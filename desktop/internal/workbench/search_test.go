@@ -147,8 +147,8 @@ func TestProjectSearchCentersTheOpenedLine(t *testing.T) {
 	}
 }
 
-// The content index is built once per visibility variant, at the query that needs it, and a page
-// that timed out while the build was in flight is retried when the build finishes.
+// The content index is built once per visibility variant: when the project opens by default, or
+// at the first query when that is deferred.
 func TestProjectSearchWarmsTheContentIndexOncePerVariant(t *testing.T) {
 	k := &warmSearchKernel{testKernel: &testKernel{Client: core.NewClient()}}
 	h := newHarness(t, k)
@@ -182,6 +182,8 @@ func TestProjectSearchWarmsTheContentIndexOncePerVariant(t *testing.T) {
 func TestProjectSearchRetriesAPageThatOutlivedTheIndexBuild(t *testing.T) {
 	k := &warmingSearchKernel{testKernel: &testKernel{Client: core.NewClient()}, release: make(chan struct{}), first: make(chan struct{}, 1)}
 	h := newHarness(t, k)
+	// Build at the first query so the test controls when the build starts.
+	h.app.settings.DisableSearchIndexOnOpen = true
 	h.app.searchView.delay = 0
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("needle\n"), 0o600); err != nil {
@@ -206,6 +208,35 @@ func TestProjectSearchRetriesAPageThatOutlivedTheIndexBuild(t *testing.T) {
 	h.await("the retried page", func() bool { return !p.search.loading && len(p.search.matches) == 1 })
 	if p.search.failed {
 		t.Fatal("the retried page failed")
+	}
+}
+
+// Opening a project builds the full-text index in the background by default; the setting defers
+// it to the first query.
+func TestProjectOpenWarmsTheSearchIndexUnlessDeferred(t *testing.T) {
+	for _, deferred := range []bool{false, true} {
+		name := "on open"
+		if deferred {
+			name = "on first query"
+		}
+		t.Run(name, func(t *testing.T) {
+			k := &warmSearchKernel{testKernel: &testKernel{Client: core.NewClient()}}
+			h := newHarness(t, k)
+			h.app.settings.DisableSearchIndexOnOpen = deferred
+			h.open(t.TempDir())
+			if deferred {
+				h.settle()
+				if warmed := k.warmed.Load(); warmed != 0 {
+					t.Fatalf("the deferred setting warmed the index %d times", warmed)
+				}
+				return
+			}
+			h.await("the index warm", func() bool { return k.warmed.Load() == 1 })
+			h.settle()
+			if warmed := k.warmed.Load(); warmed != 1 {
+				t.Fatalf("opening the project warmed the index %d times, want one", warmed)
+			}
+		})
 	}
 }
 

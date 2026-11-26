@@ -211,6 +211,19 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 				}
 			})
 		},
+		SetDisableSearchIndexOnOpen: func(value bool) {
+			a.post(func(a *App) {
+				if a.settings.DisableSearchIndexOnOpen == value {
+					return
+				}
+				a.settings.DisableSearchIndexOnOpen = value
+				a.saveSettings()
+				// Turning the setting back on starts the index now, not at the next project.
+				if p := a.project; p != nil && !value {
+					a.startSearchWarm(p, searchQuery{})
+				}
+			})
+		},
 		SetProcessTermination: func(value settingswindow.ProcessTermination) {
 			a.post(func(a *App) { a.setProcessTermination(value) })
 		},
@@ -444,6 +457,7 @@ func (a *App) openSettingsPageWith(surface actionSurface, page settingsPage, que
 			DisableSemanticHighlight: a.settings.DisableSemanticHighlight,
 			VimMode:                  a.settings.VimMode,
 			DisableAutoSave:          a.settings.DisableAutoSave,
+			DisableSearchIndexOnOpen: a.settings.DisableSearchIndexOnOpen,
 			ProcessTermination:       a.settings.ProcessTermination,
 			ConsoleEncoding:          a.settings.ConsoleEncoding,
 			SteppingFilters:          maps.Clone(a.settings.DebugSteppingFilters),

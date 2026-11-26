@@ -27,6 +27,37 @@ func waitSearchPage(t *testing.T, d *windowDriver, ready func() bool) {
 	}
 }
 
+// The index card is Lithe's own setting: its switch saves at once, without Apply, and never
+// touches the search.json source.
+func TestSearchIndexSwitchSavesAtOnce(t *testing.T) {
+	var saved []bool
+	root := filepath.Join(t.TempDir(), "preferences")
+	w := newWindow(NewController(Options{
+		SearchPreferences:           searchprefs.Source{Root: root},
+		SetDisableSearchIndexOnOpen: func(value bool) { saved = append(saved, value) },
+	}), Values{Language: "en", Theme: "dark"})
+	w.sess.page = pageSearch
+	d := openWindow(t, w)
+	waitSearchPage(t, d, func() bool { return w.searchDraft.ready && !w.searchDraft.busy })
+	label := i18n.Shared(w.marketLanguage(), "desktop.search.settings.indexOnOpen")
+	d.pump()
+	d.click(label)
+	if !w.sess.values.DisableSearchIndexOnOpen {
+		t.Fatal("the switch did not defer the index")
+	}
+	if len(saved) != 1 || !saved[0] {
+		t.Fatalf("saved %v, want one deferred value", saved)
+	}
+	d.pump()
+	d.click(label)
+	if w.sess.values.DisableSearchIndexOnOpen || len(saved) != 2 || saved[1] {
+		t.Fatalf("turning the switch back on saved %v (deferred %v)", saved, w.sess.values.DisableSearchIndexOnOpen)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the switch wrote the search preference source", err)
+	}
+}
+
 func TestSearchPageReadsAppliesAndKeepsDraftOnConflict(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "preferences")
 	w := newWindow(NewController(Options{SearchPreferences: searchprefs.Source{Root: root}}), Values{Language: "en", Theme: "dark"})

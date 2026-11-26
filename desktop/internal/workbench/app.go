@@ -363,6 +363,9 @@ type settings struct {
 	// DisableAutoSave stops saving changed files a moment after typing stops
 	// (document_autosave.go); auto-save is on by default.
 	DisableAutoSave bool `json:"disableAutoSave,omitempty"`
+	// DisableSearchIndexOnOpen defers building the full-text search index to the first
+	// query; opening a project builds it in the background by default (search.go).
+	DisableSearchIndexOnOpen bool `json:"disableSearchIndexOnOpen,omitempty"`
 	// EditorTabRows and EditorTabOverflow say how an editor group lays out tabs that do not
 	// fit in one row, as settingswindow.Values does; see App.tabLayout.
 	EditorTabRows     string `json:"editorTabRows,omitempty"`

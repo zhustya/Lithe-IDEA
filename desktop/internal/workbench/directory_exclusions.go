@@ -98,6 +98,13 @@ func (a *App) installIndexing(p *project, refresh bool) {
 			}
 			// Search results cached under the previous policy are stale.
 			a.searchView.reset()
+			// The policy revision is part of Core's index key, so the full-text index can only
+			// be built once the revision has settled: one started earlier would be a second,
+			// wasted build. Opening a project builds it now unless the user deferred it.
+			p.search.warmStarted = nil
+			if !a.settings.DisableSearchIndexOnOpen {
+				a.startSearchWarm(p, searchQuery{})
+			}
 		}
 	})
 }

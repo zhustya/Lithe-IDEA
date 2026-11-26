@@ -110,6 +110,26 @@ func (w *window) searchPage(c ui.C) {
 				}
 			})
 		})
+		w.searchIndexCard(c)
+	})
+}
+
+// searchIndexCard declares Lithe's own choice for when the full-text search index is built.
+// Unlike the size limits above it is not one of the tool's preferences, so the switch hands its
+// change to the application at once instead of waiting for Apply.
+func (w *window) searchIndexCard(c ui.C) {
+	language := w.marketLanguage()
+	on := !w.sess.values.DisableSearchIndexOnOpen
+	w.card(c, i18n.Shared(language, "desktop.search.settings.index"), i18n.Shared(language, "desktop.search.settings.indexHelp"), func() {
+		if ui.Switch(c.Part("search-index-on-open"), &on, i18n.Shared(language, "desktop.search.settings.indexOnOpen")).Changed() {
+			if w.sess.finished.Load() || w.sess.values.DisableSearchIndexOnOpen == !on {
+				return
+			}
+			w.sess.values.DisableSearchIndexOnOpen = !on
+			if w.ctrl.opts.SetDisableSearchIndexOnOpen != nil {
+				w.ctrl.opts.SetDisableSearchIndexOnOpen(!on)
+			}
+		}
 	})
 }
 func (w *window) applySearchPreferences(reset bool) {

@@ -171,6 +171,27 @@
       }
     },
     {
+      "id": "desktop.search.settings.index",
+      "description": "Search settings: build the full-text index when a project opens",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.search.settings.indexHelp",
+      "description": "Search settings: what building the search index at project open costs",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.search.settings.indexOnOpen",
+      "description": "Search settings: the switch that builds the search index when a project opens",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.everywhere.typesHelp",
       "description": "Search Everywhere: info tip next to the Types tab that explains what the tab lists and its scope.",
       "platforms": [
@@ -209,6 +230,9 @@
       "desktop.search.loadedCount": "Loaded {count} matching lines in {files} files",
       "desktop.search.settings.failed": "Could not read or save search settings. Refresh and try again. Your draft is kept.",
       "desktop.search.settings.range": "Application scope · supported range: 1–{maximum} MiB",
+      "desktop.search.settings.index": "Search index",
+      "desktop.search.settings.indexHelp": "Build the full-text index in the background when a project opens, so even the first search is fast. A large workspace reads from disk for a while and keeps the index in memory; turning this off builds it on the first search instead.",
+      "desktop.search.settings.indexOnOpen": "Build when a project opens",
       "desktop.everywhere.typesHelp": "Classes, interfaces, structs and enums reported by language servers.\nScope: only types defined in this project's folder; the standard library, SDKs and third-party dependencies are not included.\nRequires the plugin for the language. Results may be incomplete while a language server starts or loads the project.",
       "desktop.everywhere.symbolsHelp": "Functions, methods, variables, constants, fields and other declarations reported by language servers. Classes, interfaces, structs and enums are on the Types tab.\nScope: only symbols defined in this project's folder; the standard library, SDKs and third-party dependencies are not included.\nRequires the plugin for the language. Results may be incomplete while a language server starts or loads the project."
     },
@@ -235,6 +259,9 @@
       "desktop.search.loadedCount": "已加载 {files} 个文件的 {count} 行匹配",
       "desktop.search.settings.failed": "无法读取或保存搜索设置，请刷新后重试。已保留草稿。",
       "desktop.search.settings.range": "应用范围 · 支持范围：1–{maximum} MiB",
+      "desktop.search.settings.index": "搜索索引",
+      "desktop.search.settings.indexHelp": "打开项目后在后台建立全文索引，让第一次搜索也很快。大工作区会在后台读盘一段时间，并把索引常驻在内存里；关闭后改为第一次搜索时建立。",
+      "desktop.search.settings.indexOnOpen": "打开项目时建立",
       "desktop.everywhere.typesHelp": "列出语言服务报告的类、接口、结构体和枚举。\n范围：只含当前项目目录里定义的类型，不含标准库、SDK 和第三方依赖。\n需要安装该语言的插件；语言服务启动或加载项目期间，结果可能不全。",
       "desktop.everywhere.symbolsHelp": "列出语言服务报告的函数、方法、变量、常量、字段等声明；类、接口、结构体和枚举在“类型”页。\n范围：只含当前项目目录里定义的符号，不含标准库、SDK 和第三方依赖。\n需要安装该语言的插件；语言服务启动或加载项目期间，结果可能不全。"
     }

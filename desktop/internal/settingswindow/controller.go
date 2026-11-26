@@ -118,6 +118,9 @@ type Values struct {
 	// DisableAutoSave stops saving changed files a moment after typing stops; auto-save is
 	// on by default.
 	DisableAutoSave bool
+	// DisableSearchIndexOnOpen defers the full-text search index to the first query; opening a
+	// project builds it in the background by default (search.go).
+	DisableSearchIndexOnOpen bool
 	// ProcessTermination is the Process Termination page's part of Core's termination
 	// settings; the zero value keeps Core's defaults.
 	ProcessTermination ProcessTermination
@@ -561,6 +564,9 @@ type Options struct {
 	SetVimMode func(bool)
 	// SetDisableAutoSave hands a change of Values.DisableAutoSave to the settings owner.
 	SetDisableAutoSave func(bool)
+	// SetDisableSearchIndexOnOpen hands a change of Values.DisableSearchIndexOnOpen to the
+	// settings owner.
+	SetDisableSearchIndexOnOpen func(bool)
 	// ResetLayout puts the workbench's buttons back where the catalog puts them. It runs
 	// at once, on the settings window's thread, when the user presses the button, because
 	// pressing it is its own confirmation.
