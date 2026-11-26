@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -78,6 +79,43 @@ func TestLogCommitMenuCopiesTheHashesOfEveryChosenCommit(t *testing.T) {
 	v.chosen.Add(v.hashKey(rows[0].CommitHash))
 	if got := h.app.logMenuRevisions(p, 1); len(got) != 1 || got[0] != rows[1].CommitHash {
 		t.Fatalf("the menu of an unchosen row acts on %v, want only %s", got, rows[1].CommitHash)
+	}
+}
+
+// The commit menu copies the branch decorating the clicked commit, not its hash.
+func TestLogCommitMenuCopiesTheBranchNameOnTheCommit(t *testing.T) {
+	dir := newTestRepository(t)
+	gitRun(t, dir, "commit", "-am", "second")
+	gitRun(t, dir, "branch", "topic", "HEAD~1")
+	h := newHarness(t, gitKernel{core.NewClient()})
+	h.openLog(t, dir)
+
+	h.logRowMenu("initial")
+	h.click(center(h.popupHit(h.shared("git.log.copyBranchName"))))
+	if got := h.driver.Clipboard(); got != "topic" {
+		t.Fatalf("the clipboard holds %q, want topic", got)
+	}
+}
+
+// The names follow the rows' order, list a branch once, and leave out HEAD and tags.
+func TestLogMenuBranchNamesCollectsTheDecorationsOfTheChosenCommits(t *testing.T) {
+	p := &project{log: newGitLogState()}
+	p.log.graph.Rows = []core.GraphRow{
+		{CommitHash: "a", Labels: []core.GraphLabel{
+			{Kind: "head", Title: "HEAD"}, {Kind: "branch", Title: "main"},
+			{Kind: "tag", Title: "v1"}, {Kind: "remote", Title: "origin/main"}, {Kind: "remote", Title: "origin/HEAD"},
+		}},
+		{CommitHash: "b", Labels: []core.GraphLabel{
+			{Kind: "branch", Title: "topic"}, {Kind: "branch", Title: "main"},
+		}},
+		{CommitHash: "c", Labels: []core.GraphLabel{{Kind: "branch", Title: "other"}}},
+	}
+	got := logMenuBranchNames(p, []string{"a", "b"})
+	if want := []string{"main", "origin/main", "topic"}; !slices.Equal(got, want) {
+		t.Fatalf("branch names = %q, want %q", got, want)
+	}
+	if got := logMenuBranchNames(p, nil); got != nil {
+		t.Fatalf("branch names of no commits = %q, want none", got)
 	}
 }
 

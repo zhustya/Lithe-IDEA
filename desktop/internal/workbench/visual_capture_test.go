@@ -173,6 +173,7 @@ func TestVisualWorkbench(t *testing.T) {
 				{"m12-tool-window-context", "", 2}, {"m16-editor-tab-single-context", "", 1},
 				{"m18-editor-tab-multiple-context", "", 2}, {"m22-rename-dialog", "", 2}, {"m23-new-file-dialog", "", 2},
 				{"m27-editor-content-context", "", 2}, {"m48-git-local-branch-context", itemGit, 2},
+				{"m49-git-commit-context-en", itemGit, 2},
 				{"m49-git-commit-context", itemGit, 2}, {"60-terminal", itemTerminal, 2}, {"m14-terminal-actions", itemTerminal, 2}, {"m15-terminal-shell-menu", itemTerminal, 2},
 			}
 			for _, scene := range scenes {
@@ -181,8 +182,12 @@ func TestVisualWorkbench(t *testing.T) {
 					if err := prefs.Save(settingsFile, map[string]string{"theme": theme}); err != nil {
 						t.Fatal(err)
 					}
+					language := "zh-Hans"
+					if strings.HasSuffix(scene.id, "-en") {
+						language = "en-US"
+					}
 					var session *headless.Session
-					h := newHarnessWithDriver(t, Options{Kernel: gitKernel{core.NewClient()}, Store: prefs, Languages: []string{"zh-Hans"}, Version: "0.1.0"}, func(config app.Config) (*app.Driver, func(), error) {
+					h := newHarnessWithDriver(t, Options{Kernel: gitKernel{core.NewClient()}, Store: prefs, Languages: []string{language}, Version: "0.1.0"}, func(config app.Config) (*app.Driver, func(), error) {
 						config.Width, config.Height = 1440, 871
 						if scene.docs < 0 {
 							config.Width, config.Height = 800, 682
@@ -271,8 +276,8 @@ func TestVisualWorkbench(t *testing.T) {
 						h.rightClickAt(h.topHit(d.hit))
 					case "m48-git-local-branch-context":
 						h.logRefMenu("main")
-					case "m49-git-commit-context":
-						h.rightClickNamed("Document visual baseline workflow")
+					case "m49-git-commit-context", "m49-git-commit-context-en":
+						h.logRowMenu("Merge branch 'develop' into main")
 					case "60-terminal", "m14-terminal-actions", "m15-terminal-shell-menu":
 						term := busyTerminal(t, h, "printf 'Lithe terminal visual baseline\\n'; read line")
 						h.await("terminal output", func() bool { return strings.Contains(term.view.RetainedText(4096), "visual baseline") })
@@ -364,6 +369,8 @@ func TestVisualWorkbench(t *testing.T) {
 						visible = h.app.text.Git.AllReferences
 					case "m15-terminal-shell-menu":
 						visible = h.app.text.Terminal.Settings
+					case "m49-git-commit-context", "m49-git-commit-context-en":
+						visible = h.shared("git.log.copyBranchName")
 					case "04-clone-repository":
 						visible = h.shared("desktop.clone.title")
 					}

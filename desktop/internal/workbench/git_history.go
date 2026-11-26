@@ -3,6 +3,7 @@ package workbench
 import (
 	"context"
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -212,6 +213,41 @@ func (a *App) copyRevisions(revisions []string, short bool, label string) {
 		}
 	}
 	if err := app.SetClipboardText(strings.Join(hashes, "\n")); err != nil {
+		a.operationFailed("clipboard_copy", err)
+		a.notifyError(i18n.SharedFormat(a.language(), "git.log.copyFailed", map[string]string{"label": label}))
+	}
+}
+
+// logMenuBranchNames are the branch names of the branches shown on the commits the menu acts
+// on, in the order the rows paint them. HEAD and tags are not branches, and a name is listed once.
+func logMenuBranchNames(p *project, revisions []string) []string {
+	if len(revisions) == 0 {
+		return nil
+	}
+	chosen := make(map[string]bool, len(revisions))
+	for _, key := range revisions {
+		chosen[key] = true
+	}
+	var names []string
+	for _, row := range p.log.graph.Rows {
+		if !chosen[row.CommitHash] {
+			continue
+		}
+		for _, label := range row.Labels {
+			branch := label.Kind == "branch" || label.Kind == "remote" && !strings.HasSuffix(label.Title, "/HEAD")
+			if branch && label.Title != "" && !slices.Contains(names, label.Title) {
+				names = append(names, label.Title)
+			}
+		}
+	}
+	return names
+}
+
+// copyBranchNames puts the branch names on the clipboard, one per line. label names the menu
+// item, for the notice of a failure.
+func (a *App) copyBranchNames(names []string) {
+	label := i18n.Shared(a.language(), "git.log.copyBranchName")
+	if err := app.SetClipboardText(strings.Join(names, "\n")); err != nil {
 		a.operationFailed("clipboard_copy", err)
 		a.notifyError(i18n.SharedFormat(a.language(), "git.log.copyFailed", map[string]string{"label": label}))
 	}

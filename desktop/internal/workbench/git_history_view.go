@@ -30,8 +30,9 @@ func historyRewriteMenuText(lang i18n.Language, operation string) string {
 }
 
 // logCommitMenu declares the commit menu of log row, in the repository of the row's commit
-// (logMenuTarget): copying the hashes of the commits it acts on, a tag, a cherry-pick, a revert or a reset at one commit, the reviewed rewrites, and Rebase
-// from Here. Core's hints only grey out what cannot fit the selection; the dialogs decide.
+// (logMenuTarget): copying the hashes of the commits it acts on and the names of the branches
+// decorating them, a tag, a cherry-pick, a revert or a reset at one commit, the reviewed rewrites,
+// and Rebase from Here. Core's hints only grey out what cannot fit the selection; the dialogs decide.
 func (a *App) logCommitMenu(p *project, row int) func(*ui.MenuItems) {
 	return func(menu *ui.MenuItems) {
 		root, keys, revisions := a.logMenuTarget(p, row)
@@ -51,6 +52,10 @@ func (a *App) logCommitMenu(p *project, row int) func(*ui.MenuItems) {
 			if menu.Item(label).Clicked() {
 				a.copyRevisions(revisions, short, label)
 			}
+		}
+		names := logMenuBranchNames(p, revisions)
+		if menu.Item(i18n.Shared(lang, "git.log.copyBranchName")).Disabled(len(names) == 0).Clicked() {
+			a.copyBranchNames(names)
 		}
 		menu.Separator()
 		if menu.Item(i18n.Shared(lang, "git.log.newTag")).Disabled(!single).Clicked() {
