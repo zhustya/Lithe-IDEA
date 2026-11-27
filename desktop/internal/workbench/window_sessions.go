@@ -22,7 +22,8 @@ import (
 // belongs to the first workbench's plugin stack. The others open theirs without sweeping
 // interrupted installs or offering leftover processes (pluginservice.OpenAnother).
 //
-// Plugin web pages need the window's web host, which only the first workbench has.
+// The web host and its readiness belong to the window; every project uses the same host,
+// while plugin pages and editor previews keep their own project-scoped state and lifetime.
 
 // windowWake asks the window for a repaint through the invalidator the window was opened with.
 // Every workbench of the window holds the same one. The zero value, which a workbench made
@@ -48,11 +49,18 @@ type windowSessions struct {
 	retired []*App
 	// configs are the page configurations of the workbenches, made once for each.
 	configs map[*App]app.Config
+	// web is bound once to the native window. It outlives individual project tabs.
+	web app.WebHost
+	// webReady is set by that host on the window thread, also for tabs opened afterward.
+	webReady bool
 	// options make the workbench of a new tab.
 	options Options
 	// meter times the window thread for the status bar's frame readout (frame_meter.go). Every
 	// callback of the window starts in config, so that is where it is timed.
 	meter frameMeter
+	// geometry tracks the window's floating size and maximized state so the next window opens
+	// at the size the user left this one in (window_size.go).
+	geometry windowGeometryState
 }
 
 // Project tab metrics, as the earlier client drew them.
@@ -68,11 +76,18 @@ const (
 // newWindowSessions makes the sessions of the window whose first workbench is first.
 func newWindowSessions(first *App, options Options) *windowSessions {
 	options.OpenPath = ""
+	options.OpenFile = ""
 	options.first = first
-	return &windowSessions{
+	s := &windowSessions{
 		list: []*App{first}, active: first, configs: map[*App]app.Config{}, options: options,
-		meter: frameMeter{now: first.now},
+		meter:    frameMeter{now: first.now},
+		geometry: newWindowGeometryState(first.settings),
 	}
+	s.web.OnReady = func() {
+		s.webReady = true
+		s.active.invalidator.Invalidate()
+	}
+	return s
 }
 
 // config is the window's configuration. It takes the window's settings from the first
@@ -158,6 +173,16 @@ func (s *windowSessions) config() app.Config {
 			s.active.resumePluginAutoUpdates()
 		}
 	}
+	window.OnFrameChange = func(frame gfx.Rect) {
+		meter.begin(true)
+		defer meter.end()
+		s.geometry.framed(frame)
+	}
+	window.OnMaximize = func(maximized bool) {
+		meter.begin(true)
+		defer meter.end()
+		s.geometry.setMaximized(maximized)
+	}
 	window.OnFullscreen = func(fullscreen bool) {
 		meter.begin(true)
 		defer meter.end()
@@ -176,6 +201,7 @@ func (s *windowSessions) config() app.Config {
 				closed()
 			}
 		}
+		s.saveWindowGeometry()
 		if logs := s.list[0].logs; logs != nil {
 			logs.Close()
 		}
@@ -250,6 +276,21 @@ func (s *windowSessions) openTab(path string) {
 	a.openProjectHere(path)
 }
 
+// openRemoteTab opens the remote workspace target in a new workbench of the window, in a tab after
+// the others, and shows it. from is the workbench whose Remote Development window connected it:
+// every tab shares the kernel, so the new tab takes over the session from opened, and what tests
+// replaced in from.
+func (s *windowSessions) openRemoteTab(from *App, target remoteTarget) {
+	a := New(s.options)
+	a.remoteBundle, a.remoteAnchor, a.remoteAfter = from.remoteBundle, from.remoteAnchor, from.remoteAfter
+	a.remoteSecretStore = from.remoteSecretStore
+	s.list = append(s.list, a)
+	s.activate(a)
+	a.reloadPluginLanguages()
+	a.loadGitHubAccount()
+	a.openRemoteProject(target)
+}
+
 // leave takes workbench a out of the strip once its project has closed, when the window has
 // other tabs. The tab beside it is then shown. The last workbench stays and shows the welcome
 // screen.
@@ -275,7 +316,7 @@ func (s *windowSessions) leave(a *App) {
 	a.stopWatchingDiagnostics()
 	a.closeClone()
 	a.closeNewProject()
-	a.settingsWindow.Close()
+	a.closeSettingsWindow()
 	if a.root != nil {
 		a.root.Close()
 	}
@@ -348,17 +389,17 @@ func (a *App) projectTab(c ui.C, tab *App, i, size int) {
 	}
 	var closeButton ui.Box
 	chip.Children(func() {
-		ui.Icon(k, icons.Folder).Size(projectTabIcon, projectTabIcon).Shrink(0).Color(a.colors.Subtle)
-		name := ui.Text(k, p.name).Ellipsis().Shrink(0)
+		ui.Icon(c, icons.Folder).Size(projectTabIcon, projectTabIcon).Shrink(0).Color(a.colors.Subtle)
+		name := ui.Text(c, p.name).Ellipsis().Shrink(0)
 		if shown {
 			name.Color(a.colors.Text)
 		} else {
 			name.Color(a.colors.Subtle).StateFrom(chip).Hover(ui.Look{}.Color(a.colors.Text))
 		}
 		if d := p.selectedDocument(p.terms.bench.FocusedGroup); d != nil && d.path != "" {
-			ui.Text(k.Part("file"), "· "+filepath.Base(d.path)).Color(a.colors.Subtle).Ellipsis()
+			ui.Text(c, "· "+filepath.Base(d.path)).Color(a.colors.Subtle).Ellipsis()
 		}
-		ui.Spacer(k)
+		ui.Spacer(c)
 		cc := k.Part("close")
 		closeButton = ui.Row(cc).Size(terminalCloseSize, terminalCloseSize).Shrink(0).Center().
 			Radius(a.theme.Metrics.RadiusItem()).

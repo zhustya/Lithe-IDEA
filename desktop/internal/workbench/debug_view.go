@@ -137,7 +137,7 @@ func (a *App) debugToolbar(c ui.C, p *project) {
 			}
 			ui.Text(c, status).Shrink(1).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Ellipsis()
 		}
-		a.debugAdapterPicker(c.Part("adapter"), p)
+		a.debugAdapterPicker(c, p)
 	})
 }
 
@@ -216,7 +216,7 @@ func (a *App) debugAdapterPicker(c ui.C, p *project) {
 	for index := range indexes {
 		indexes[index] = index
 	}
-	ui.Select(c, &d.selectedAdapter, indexes, func(index int) string {
+	ui.Select(c.Part("adapter"), &d.selectedAdapter, indexes, func(index int) string {
 		return d.adapters[index].Declaration.DisplayName
 	}).Label(i18n.Shared(a.language(), "desktop.debug.adapter")).Width(debugAdapterPickerWidth).Height(24).Shrink(1)
 }
@@ -247,7 +247,7 @@ func (a *App) debugRemotePrompt(c ui.C, p *project) {
 		return
 	}
 	endpoint := d.remote.endpoint
-	closed := ui.Modal(c, open, t.RemoteTitle, func() {
+	closed := ui.Modal(c, open, t.RemoteTitle, ui.ModalSpec{}, func() {
 		ui.Paragraph(c, t.RemotePrompt(endpoint), 4).Color(a.colors.Warning)
 	}, func() {
 		if ui.Button(c, t.RemoteCancel).Outline().Clicked() {
@@ -300,7 +300,7 @@ func (a *App) debugBreakpointsDialog(c ui.C, p *project) {
 	}
 	t := a.text.Debug
 	k := c.Part("breakpoints-dialog")
-	closed := ui.ModalWith(k, open, t.Breakpoints, ui.ModalSpec{Width: 560}, func() {
+	closed := ui.Modal(k, open, t.Breakpoints, ui.ModalSpec{Width: 560}, func() {
 		ui.Column(k).FillWidth().Gap(6).Children(func() {
 			a.debugBreakpoints(k, p)
 			a.debugExceptionsView(k, p)

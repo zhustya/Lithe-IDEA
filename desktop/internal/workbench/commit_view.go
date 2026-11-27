@@ -125,11 +125,15 @@ func (a *App) drawCommitToolbar(c ui.C, p *project) {
 func (a *App) drawCommitStatus(c ui.C, p *project) bool {
 	g := a.text.Git
 	switch {
+	case p.git.safeMode:
+		a.safeModePanel(c, p, i18n.Shared(a.language(), "desktop.trust.gitSafeMode"))
+	case p.git.remoteAbove:
+		a.gitEmpty(c, i18n.Shared(a.language(), "desktop.remote.workspace.gitAbove"))
 	case !p.git.loaded:
 		a.gitEmpty(c, g.Loading)
 	case p.git.err != nil:
 		ui.Column(c).Fill().Center().Gap(8).PadX(shellContentPad).Children(func() {
-			ui.Paragraph(c, g.Failed(p.git.err.Error()), 3).TextCenter().Color(a.colors.Subtle)
+			ui.Paragraph(c, g.Failed(p.git.err.Error()), 3).FillWidth().TextCenter().Color(a.colors.Subtle)
 			if ui.Button(c, g.Retry).Ghost().Clicked() {
 				c.After(func() { a.refreshChanges(p) })
 			}
@@ -408,7 +412,7 @@ func (a *App) drawCommitOptions(c ui.C, cs *commitState, generates bool) {
 	// they belong to; they line up with the gear at the bottom and grow upwards, and open on
 	// the left when the panel is docked at the window's right edge.
 	spec := ui.PopoverSpec{Side: components.PopoverRight, Align: ui.End, Width: 320}
-	ui.PopoverWith(c, button, spec, &cs.optionsOpen, func() {
+	ui.Popover(c, button, &cs.optionsOpen, spec, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			a.commitOptionHeading(c, i18n.Shared(lang, "desktop.commit.optionsGit"))
 			ui.Row(c).FillWidth().Items(ui.Center).Gap(4).Children(func() {
@@ -485,7 +489,7 @@ func (a *App) drawCommitResults(c ui.C, p *project, target commitTarget) {
 				ui.Text(c, t.Result(target.repositoryName(id), a.commitStatusLabel(result.Status))).Color(tint).Ellipsis().Grow(1)
 			})
 			if result.Detail != "" {
-				ui.Paragraph(c.Key(id+"/detail"), result.Detail, 3).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
+				ui.Paragraph(c, result.Detail, 3).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 			}
 		}
 		ui.Row(c).FillWidth().Items(ui.Center).Gap(6).Children(func() {
@@ -569,7 +573,7 @@ func (a *App) drawCommitReview(c ui.C, p *project, target commitTarget) {
 		questions[q.RepositoryID] = i
 	}
 	open := true
-	closed := ui.ModalWith(c, &open, title, ui.ModalSpec{Description: t.Order, Width: 520}, func() {
+	closed := ui.Modal(c, &open, title, ui.ModalSpec{Description: t.Order, Width: 520}, func() {
 		ui.Column(c).FillWidth().Gap(8).Children(func() {
 			ui.Paragraph(c, t.MessageLine(firstLine(session.Message)), 2)
 			if session.Amend {

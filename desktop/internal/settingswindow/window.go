@@ -1,6 +1,7 @@
 package settingswindow
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 
@@ -16,7 +17,9 @@ import (
 
 // The metrics of the window, after the macOS client's settings window and the log window.
 const (
-	windowWidth, windowHeight = 900, 700
+	// windowWidth and windowHeight are the size the window opens at until the user gives it
+	// another, which it then keeps (Values.WindowWidth, Options.WindowResized).
+	windowWidth, windowHeight = 1270, 700
 	windowMinWidth            = 900
 	windowMinHeight           = 668
 
@@ -75,25 +78,37 @@ const (
 // window is one open settings window and the model of its Page. Everything in it runs on
 // its window thread, but for the fields that say so.
 type window struct {
-	searchDraft      searchPreferencesDraft
-	editorDelay      ui.Field
-	editorDelayReady bool
-	editorPrefsError string
-	scheme           schemeDraft
-	ctrl             *Controller
-	sess             *session
+	cli                      cliRegistration
+	associations             associationRegistration
+	searchDraft              searchPreferencesDraft
+	editorDelay              ui.Field
+	editorDelayReady         bool
+	editorPrefsError         string
+	editorPreferencesChanged atomic.Pointer[editorPreferencesUpdate]
+	rainbowLight             rainbowPaletteEditor
+	rainbowDark              rainbowPaletteEditor
+	scheme                   schemeDraft
+	ctrl                     *Controller
+	sess                     *session
 
 	// win, stopWatch and gone are guarded by ctrl.mu: Controller.Open fills them in from the
 	// thread that opened the window, and the window's own thread reads and clears them.
 	win       *app.Window
 	stopWatch func()
 	gone      bool
+	// openedSize is the size the window opened at and size the size of its content in the last
+	// frame the system reported, which is kept when it differs (closed, Controller.ResizedWindow).
+	// size is guarded by ctrl.mu too: the window's thread sets it, and the owner may read it
+	// from its own thread.
+	openedSize windowSize
+	size       windowSize
 
 	inv  app.Invalidator
 	page *ui.Page
 
-	market  *marketplaceState
-	install *pluginInstallDialog
+	market      *marketplaceState
+	marketIcons marketplaceIcons
+	install     *pluginInstallDialog
 	// commands is the Installed tab's check of the commands plugins need and the dialog that
 	// installs them (command_install.go).
 	commands *commandInstalls
@@ -102,6 +117,8 @@ type window struct {
 	// filter and detail (installed_view.go).
 	pluginTab int
 	installed installedState
+	// changelog is the releases the Installed tab's changelog has read (installed_changelog.go).
+	changelog changelogState
 	// pluginMenuOpen says the plugin page's gear menu is open, and repositoriesOpen the
 	// window that manages the plugin repositories.
 	pluginMenuOpen   bool
@@ -120,6 +137,13 @@ type window struct {
 	// window's own thread.
 	requestedPage         atomic.Uint32
 	pluginRegistryChanged atomic.Bool
+	// raised says Controller.open raised the window since its last paint; marketRecheck that
+	// the plugin page, the next time it is painted, reads its plugins again when they are
+	// stale, which entering the page or raising the window asks for. marketShown is whether
+	// the last paint showed the plugin page.
+	raised        atomic.Bool
+	marketRecheck bool
+	marketShown   bool
 	// toolchains is the Build settings page's draft and loaded snapshot.
 	toolchains *toolchainState
 	stepping   *steppingState
@@ -127,7 +151,9 @@ type window struct {
 	apply buildApply
 	// kinds is the list of each kind of plugin pages under Build, by the kind's place in
 	// buildKinds: its filter, its rows and the page it last showed.
-	kinds          [len(buildKinds)]kindState
+	kinds [len(buildKinds)]kindState
+	// languages is the directory of the Languages & Frameworks page (languages_view.go).
+	languages      ui.ListState
 	pluginSettings *pluginSettingsForm
 	pluginForms    map[string]*pluginSettingsForm
 	// region is the plugin view of the settings region on screen (plugin_region_view.go).
@@ -242,9 +268,25 @@ type labelsKey struct {
 	systemDark bool
 }
 
+// windowSize is the size of a window's content area, in logical pixels.
+type windowSize struct {
+	width, height int
+}
+
+// openingSize is the size a window opens at: the one the user last gave it, or the default
+// when none is kept, and never under the smallest.
+func openingSize(width, height int) windowSize {
+	if width <= 0 || height <= 0 {
+		width, height = windowWidth, windowHeight
+	}
+	return windowSize{width: max(width, windowMinWidth), height: max(height, windowMinHeight)}
+}
+
 // newWindow returns a window whose values start from the settings in force.
 func newWindow(c *Controller, current Values) *window {
 	w := &window{ctrl: c, sess: newSession(current)}
+	w.openedSize = openingSize(current.WindowWidth, current.WindowHeight)
+	w.size = w.openedSize
 	width := current.MarketplaceWidth
 	if width <= 0 {
 		width = marketListWidth
@@ -259,11 +301,12 @@ func newWindow(c *Controller, current Values) *window {
 	w.market.setCustom(c.opts.MarketplaceSources)
 	w.market.reportDiscarded = c.opts.MarketplaceError
 	w.market.search.rank = c.opts.MarketplaceRank
-	w.marketQuery = current.MarketplaceQuery
-	if w.marketQuery != "" {
+	if current.MarketplaceQuery != nil {
+		w.marketQuery = *current.MarketplaceQuery
 		w.pluginTab = pluginTabMarketplace
 	}
 	w.market.search.report = c.opts.MarketplaceError
+	w.marketIcons = newMarketplaceIcons(c.opts.MarketplaceIcon, c.opts.MarketplaceIconError)
 	w.pluginSettings = newPluginSettingsForm(c.opts.PluginSettings)
 	w.pluginForms = make(map[string]*pluginSettingsForm)
 	w.settingsNotices = make(chan string, 64)
@@ -276,6 +319,7 @@ func newWindow(c *Controller, current Values) *window {
 	w.stepping = newSteppingState(c.opts.SteppingAdapters, c.opts.NormalizeSteppingFilters)
 	w.terminal = newTerminalShellState(c.opts.TerminalShells)
 	w.fonts = newFontListState(c.opts.MonospaceFamilies)
+	w.changelog = newChangelogState(c.opts.PluginReleases, func(err error) { reportSettingsError(c.opts, "plugin_releases", err) })
 	w.generation = newAIGeneration(c.opts, func() { w.inv.Invalidate() })
 	w.nav.Node, w.nav.Key, w.nav.RowHeight, w.nav.Indent = w.navNode, w.navKey, rowHeight, levelIndent
 	return w
@@ -283,12 +327,17 @@ func newWindow(c *Controller, current Values) *window {
 
 // config is the native window's configuration: the Page paints it and routes its input.
 func (w *window) config() app.Config {
-	w.page = ui.NewPage(ui.PageConfig{View: w.view, Theme: &w.theme, Background: &w.background, Invalidator: &w.inv, BarStyle: uistyle.Bars})
+	w.page = ui.NewPage(ui.PageConfig{
+		View: w.view, Theme: &w.theme, Background: &w.background, Invalidator: &w.inv, BarStyle: uistyle.Bars,
+		// Paths, values and sidebar entries cut short with an ellipsis show their whole value
+		// when the pointer rests on them.
+		EllipsisTooltips: true,
+	})
 	config := ui.Configure(w.page, app.Config{
 		Title:          w.ctrl.text().Settings.Title,
 		Icon:           appicon.Window(),
-		Width:          windowWidth,
-		Height:         windowHeight,
+		Width:          w.openedSize.width,
+		Height:         w.openedSize.height,
 		MinWidth:       windowMinWidth,
 		MinHeight:      windowMinHeight,
 		WindowMode:     app.WindowCustomTitlebar,
@@ -296,7 +345,9 @@ func (w *window) config() app.Config {
 		WindowControls: func() app.WindowControlsStyle { return windowcontrols.Style(w.pal.text, w.ctrl.text()) },
 		Invalidator:    &w.inv,
 		OnWake:         w.wake,
+		OnFrameChange:  w.framed,
 		OnClosed:       w.closed,
+		OnActivate:     w.refreshAssociations,
 		// Chords of printable keys reach the window as shortcuts, not as keys of the
 		// control that has the focus; the one the Keymap page records arrives here.
 		OnShortcut: w.recordShortcut,
@@ -341,6 +392,7 @@ func (w *window) takeQuery() (string, bool) {
 // wake runs on the window thread right before each repaint an Invalidate requested. It
 // takes a page request and what the plugin registry and the settings sources changed.
 func (w *window) wake() {
+	w.takeEditorPreferences()
 	if q, ok := w.takeQuery(); ok {
 		// A search the workbench asks for is a search of the marketplace.
 		w.marketQuery = q
@@ -371,6 +423,9 @@ func (w *window) wake() {
 		w.searchField.SetText("")
 		w.selectSettingsPage(pageID(requested-1), "")
 	}
+	if w.raised.Swap(false) {
+		w.marketRecheck = true
+	}
 }
 
 // watchSystem makes the window repaint when the system switches between its light and dark
@@ -397,10 +452,32 @@ func (w *window) native() *app.Window {
 	return w.win
 }
 
+// framed takes the size of the window's content from a frame the system reports. It is the
+// window's own size: Viva reports no frame while the window is full screen, maximized or
+// minimized. A live resize reports every step, so the size is only noted here and kept when
+// the window closes, never written per frame.
+func (w *window) framed(frame gfx.Rect) {
+	size := windowSize{width: int(math.Round(float64(frame.Width))), height: int(math.Round(float64(frame.Height)))}
+	if size.width <= 0 || size.height <= 0 {
+		return
+	}
+	w.ctrl.mu.Lock()
+	w.size = size
+	w.ctrl.mu.Unlock()
+}
+
+// resized is the size the user gave the window since it opened, if any. The caller holds
+// ctrl.mu.
+func (w *window) resized() (windowSize, bool) {
+	return w.size, w.size != w.openedSize
+}
+
 // closed runs once the native window is gone, however it was closed: the session is over,
-// the system look is no longer watched and the controller forgets the window, so the next
-// Open makes a new one. The Page has cancelled its effects by then.
+// the system look is no longer watched, the controller forgets the window, so the next Open
+// makes a new one, and a size the user gave the window is kept for that one. The Page has
+// cancelled its effects by then.
 func (w *window) closed() {
+	w.marketIcons.reset(0)
 	w.closeRegion()
 	w.dismissPluginInstall()
 	if w.ctrl.opts.PluginInstallsClosed != nil {
@@ -415,9 +492,13 @@ func (w *window) closed() {
 	if c.current == w {
 		c.current = nil
 	}
+	size, resized := w.resized()
 	c.mu.Unlock()
 	if stop != nil {
 		stop()
+	}
+	if resized && c.opts.WindowResized != nil {
+		c.opts.WindowResized(size.width, size.height)
 	}
 }
 
@@ -467,6 +548,7 @@ func (w *window) prepare(size gfx.Size) {
 
 // collect takes the result of each background request on the window thread.
 func (w *window) collect() {
+	w.marketIcons.take()
 	toolchainFailed := w.toolchains.take()
 	saved, err, done := w.stepping.take()
 	if done && err == nil {
@@ -475,15 +557,15 @@ func (w *window) collect() {
 	w.advanceApply(toolchainFailed, steppingResult{done: done, err: err})
 	w.terminal.take()
 	w.fonts.take()
+	w.changelog.take()
 	w.takeKeymapImport()
 	w.takeSearchPreferences()
 	w.commands.take()
 	if w.dynamic.take() {
 		w.rowsValid = false
 	}
-	previous := w.market.status
-	w.market.take()
-	w.reportMarket(previous)
+	ended, kept := w.market.take()
+	w.reportMarket(ended, kept)
 	w.market.search.take(w.market, w.marketQuery)
 	w.pluginSettings.take()
 	for _, form := range w.pluginForms {
@@ -494,12 +576,15 @@ func (w *window) collect() {
 }
 
 // reportMarket tells the owner how the fetch that just ended went: that it failed, or how
-// many entries of the index were rejected.
-func (w *window) reportMarket(previous marketStatus) {
-	if previous != marketLoading {
+// many entries of the index were rejected. kept is the failure of a background refresh, which
+// leaves the plugins it refreshed shown; the owner logs it like any other failure.
+func (w *window) reportMarket(ended bool, kept error) {
+	if !ended {
 		return
 	}
 	switch {
+	case kept != nil && w.ctrl.opts.MarketplaceError != nil:
+		w.ctrl.opts.MarketplaceError(kept)
 	case w.market.status == marketFailed && w.ctrl.opts.MarketplaceError != nil:
 		w.ctrl.opts.MarketplaceError(w.market.err)
 	case w.market.status == marketReady && len(w.market.snapshot.Index.Rejected) > 0 && w.ctrl.opts.MarketplaceRejected != nil:
@@ -511,6 +596,8 @@ func (w *window) reportMarket(previous marketStatus) {
 // of the declaration, so a request made while the page was declared starts in the same
 // paint, and in every paint, so leaving a page does not cancel what it asked for.
 func (w *window) declareWork(c ui.C) {
+	w.declareCLI(c)
+	w.declareAssociations(c)
 	if d := &w.searchDraft; d.effect != nil && d.work != nil {
 		ui.Effect(c, d.effect, d.work)
 	}
@@ -518,6 +605,7 @@ func (w *window) declareWork(c ui.C) {
 	w.stepping.declare(c)
 	w.terminal.declare(c)
 	w.fonts.declare(c)
+	w.changelog.declare(c)
 	if s := &w.keyImport; s.open && s.effect != nil && s.request != nil {
 		ui.Effect(c, s.effect, s.request)
 	}

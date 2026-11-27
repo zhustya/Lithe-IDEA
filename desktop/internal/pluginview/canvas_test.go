@@ -2,10 +2,55 @@ package pluginview
 
 import (
 	"math"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/vivaui/viva/gfx"
+	"github.com/vivaui/viva/ui"
 )
+
+func TestCanvasEllipsisShowsAllRunsAndKeepsGroupClick(t *testing.T) {
+	d := drawView(t, `[{"type":"canvas","id":"graph","label":"Graph","height":180,"viewBox":[0,0,440,180],"nodes":[
+		{"type":"group","id":"item","x":20,"y":20,"w":200,"h":80,"on":["click"],"label":"Open item","tooltip":"Group details","children":[
+			{"type":"text","x":10,"y":30,"maxWidth":110,"runs":[
+				{"text":"完整文件名称-with-a-long-extension.txt"},{"text":" · additional information"}]}]}]}]`)
+	var text gfx.Rect
+	for _, label := range d.driver.Snapshot().Labels {
+		if strings.HasSuffix(label.Value, "…") {
+			text = label.Bounds
+			break
+		}
+	}
+	if text.Width == 0 {
+		t.Fatal("the canvas label was not ellipsized")
+	}
+	x, y := text.X+5, text.Y+text.Height/2
+	if err := d.driver.Move(x, y); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.driver.Advance(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	var full strings.Builder
+	for _, label := range d.driver.Snapshot().Labels {
+		if label.Value == "Group details" {
+			t.Fatal("the group and full-text tooltips appeared together")
+		}
+		if label.Layer == ui.TooltipLayer {
+			full.WriteString(label.Value)
+		}
+	}
+	if got, want := strings.Join(strings.Fields(full.String()), ""), "完整文件名称-with-a-long-extension.txt·additionalinformation"; got != want {
+		t.Fatalf("canvas tooltip %q, want %q", got, want)
+	}
+	if err := d.driver.Click(x, y); err != nil {
+		t.Fatal(err)
+	}
+	if event := d.sent(); event["event"] != "click" || event["node"] != "item" {
+		t.Fatalf("click through the full-text tooltip sent %v", event)
+	}
+}
 
 // testCanvas is a canvas node of a 400 × 400 view box that pans, zooms from half to four
 // times and tells the plugin where it lies.
@@ -202,5 +247,50 @@ func TestCanvasWheelZoomsOnlyWithCommandOrControl(t *testing.T) {
 	b.now = b.now.Add(settleDelay)
 	if s.Take(); len(b.pending) != 0 {
 		t.Fatal("a canvas that does not ask for viewport sent one")
+	}
+}
+
+// A line of runs that fits is drawn whole. The room the runs had left was the line's float32
+// width minus the runs before, which can come out a hair under the last run's own width, and
+// fitting the run into that hair cut its last character for an ellipsis: a Python settings
+// preview showed "bad-argument-type · 2 erro…" with plenty of room in its bar.
+func TestCanvasTextDrawsRunsThatFitWhole(t *testing.T) {
+	widths := map[string]float32{"bad-argument-type": 101.3, " · 2 errors": 62.7}
+	canvas := new(gfx.Canvas)
+	canvas.SetMeasurer(func(value string, _, _ float32) float32 {
+		if width, ok := widths[value]; ok {
+			return width
+		}
+		return float32(len(value)) * 6
+	})
+	var total float32
+	total += widths["bad-argument-type"]
+	total += widths[" · 2 errors"]
+	if total-widths["bad-argument-type"] >= widths[" · 2 errors"] {
+		t.Fatal("the widths no longer round below the last run; pick others")
+	}
+	for _, maxWidth := range []float64{0, 400} {
+		canvas.Reset()
+		pt := &painter{d: &ui.DrawContext{Canvas: canvas}, state: &canvasState{}, p: &Palette{}}
+		pt.text(&Shape{X: 10, Y: 20, Style: "caption", MaxWidth: maxWidth, Runs: []Run{
+			{Text: "bad-argument-type"}, {Text: " · 2 errors"},
+		}}, place{k: 1}, 1)
+		var drawn []string
+		for _, text := range canvas.Texts() {
+			drawn = append(drawn, text.Value)
+		}
+		if len(drawn) != 2 || drawn[0] != "bad-argument-type" || drawn[1] != " · 2 errors" {
+			t.Fatalf("maxWidth %v drew %q", maxWidth, drawn)
+		}
+	}
+	// A line wider than maxWidth is still cut, in the run that crosses it.
+	canvas.Reset()
+	pt := &painter{d: &ui.DrawContext{Canvas: canvas}, state: &canvasState{}, p: &Palette{}}
+	pt.text(&Shape{X: 10, Y: 20, Style: "caption", MaxWidth: 130, Runs: []Run{
+		{Text: "bad-argument-type"}, {Text: " · 2 errors"},
+	}}, place{k: 1}, 1)
+	texts := canvas.Texts()
+	if len(texts) != 2 || texts[0].Value != "bad-argument-type" || !strings.HasSuffix(texts[1].Value, "…") {
+		t.Fatalf("a line past maxWidth drew %+v", texts)
 	}
 }

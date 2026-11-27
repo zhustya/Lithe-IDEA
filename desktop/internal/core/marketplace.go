@@ -24,11 +24,12 @@ type MarketplaceRejection struct {
 func (r *MarketplaceRejection) Error() string { return fmt.Sprintf("%s: %s", r.Code, r.Message) }
 
 type marketplaceOutcome struct {
-	Status string                `json:"status"`
-	Error  *MarketplaceRejection `json:"error"`
-	Index  *MarketplaceIndex     `json:"index"`
-	Source *MarketplaceSource    `json:"source"`
-	Review *MarketplaceReview    `json:"review"`
+	Status         string                           `json:"status"`
+	Error          *MarketplaceRejection            `json:"error"`
+	Index          *MarketplaceIndex                `json:"index"`
+	Source         *MarketplaceSource               `json:"source"`
+	Review         *MarketplaceReview               `json:"review"`
+	Recommendation *MarketplaceRecommendationResult `json:"recommendation"`
 }
 
 func (o marketplaceOutcome) failure(command string) error {
@@ -41,11 +42,35 @@ func (o marketplaceOutcome) failure(command string) error {
 	return nil
 }
 
-// MarketplaceSource is Core's canonical index location and its optional repository.
+// MarketplaceSource is Core's canonical index location and its optional repository. IndexURL is
+// the source's identity; Pinned only says where the same files are at one commit.
 type MarketplaceSource struct {
-	IndexURL    string  `json:"indexURL"`
-	Repository  *string `json:"repository"`
-	DisplayName string  `json:"displayName"`
+	IndexURL           string  `json:"indexURL"`
+	RecommendationsURL string  `json:"recommendationsURL"`
+	DeltasURL          string  `json:"deltasURL"`
+	Repository         *string `json:"repository"`
+	DisplayName        string  `json:"displayName"`
+	// Revision is the GitHub repository and ref a GitHub-hosted index follows; nil for any
+	// other source and for an index URL already at a commit.
+	Revision *MarketplaceRevision `json:"revision"`
+	// Pinned is the index and recommendations at the commit PinMarketplaceSource passed; nil
+	// when nothing could be pinned.
+	Pinned *MarketplacePinned `json:"pinned"`
+}
+
+// MarketplaceRevision is the repository and ref whose newest commit pins a source.
+type MarketplaceRevision struct {
+	Repository GitHubRepo `json:"repository"`
+	Ref        string     `json:"ref"`
+}
+
+// MarketplacePinned is a source's files at one commit. Branch URLs on raw.githubusercontent.com
+// are cached for minutes; a commit URL is not served stale.
+type MarketplacePinned struct {
+	Commit             string `json:"commit"`
+	IndexURL           string `json:"indexURL"`
+	RecommendationsURL string `json:"recommendationsURL"`
+	DeltasURL          string `json:"deltasURL"`
 }
 
 // MarketplaceAvailability is Core's platform and capability decision.
@@ -87,9 +112,11 @@ type MarketplacePlugin struct {
 	LatestReleaseDate     string            `json:"latestReleaseDate"`
 	// MarketplaceIndexURL identifies the validated source of a fetched listing. It is
 	// native-only provenance and must never appear in the Core JSON contract.
-	MarketplaceIndexURL string                  `json:"-"`
-	Availability        MarketplaceAvailability `json:"availability"`
-	Versions            []MarketplaceVersion    `json:"versions"`
+	MarketplaceIndexURL string `json:"-"`
+	// MarketplaceDeltasURL comes from the same index revision as Availability.
+	MarketplaceDeltasURL string                  `json:"-"`
+	Availability         MarketplaceAvailability `json:"availability"`
+	Versions             []MarketplaceVersion    `json:"versions"`
 }
 
 // MarketplaceEntryRejection describes one rejected entry without hiding accepted entries.
@@ -113,11 +140,22 @@ type MarketplaceReview struct {
 
 // ResolveMarketplaceSource delegates URL validation and canonicalization to Core.
 func (c *Client) ResolveMarketplaceSource(ctx context.Context, url string) (MarketplaceSource, error) {
+	return c.resolveMarketplaceSource(ctx, url, "")
+}
+
+// PinMarketplaceSource resolves url like ResolveMarketplaceSource and adds Pinned, its files at
+// commit, the newest commit of the source's Revision.
+func (c *Client) PinMarketplaceSource(ctx context.Context, url, commit string) (MarketplaceSource, error) {
+	return c.resolveMarketplaceSource(ctx, url, commit)
+}
+
+func (c *Client) resolveMarketplaceSource(ctx context.Context, url, commit string) (MarketplaceSource, error) {
 	const command = "plugins.marketplace.resolveSource"
 	var result marketplaceOutcome
 	if err := c.Execute(ctx, command, struct {
-		URL string `json:"url"`
-	}{url}, &result); err != nil {
+		URL    string `json:"url"`
+		Commit string `json:"commit,omitempty"`
+	}{url, commit}, &result); err != nil {
 		return MarketplaceSource{}, err
 	}
 	if err := result.failure(command); err != nil {
@@ -176,4 +214,82 @@ func (c *Client) ReviewMarketplaceInstall(ctx context.Context, manifest json.Raw
 		return MarketplaceReview{}, newParseError(command, "marketplace returned no review", "")
 	}
 	return *result.Review, nil
+}
+
+// MarketplaceRecommendationCatalog pairs one marketplace index with its companion recommendations catalog.
+type MarketplaceRecommendationCatalog struct {
+	Index           json.RawMessage       `json:"index"`
+	SourceKind      MarketplaceSourceKind `json:"sourceKind"`
+	IndexURL        string                `json:"indexURL,omitempty"`
+	Recommendations json.RawMessage       `json:"recommendations"`
+}
+
+// MarketplaceRecommendation is one validated plugin recommendation matched against the workspace.
+type MarketplaceRecommendation struct {
+	Plugin              MarketplacePlugin `json:"plugin"`
+	MatchedMarkers      []string          `json:"matchedMarkers"`
+	MatchedExtensions   []string          `json:"matchedExtensions"`
+	MarketplaceIndexURL string            `json:"marketplaceIndexURL,omitempty"`
+}
+
+// MarketplaceRecommendationResult holds accepted recommendations and isolated catalog/entry rejections.
+type MarketplaceRecommendationResult struct {
+	Plugins  []MarketplaceRecommendation `json:"plugins"`
+	Rejected []MarketplaceEntryRejection `json:"rejected"`
+}
+
+// RecommendMarketplacePlugins asks Core to match workspace signals against recommendation catalogs.
+func (c *Client) RecommendMarketplacePlugins(
+	ctx context.Context,
+	platform string,
+	workspaceFiles []string,
+	catalogs []MarketplaceRecommendationCatalog,
+	hostCapabilities map[string][]int,
+	installedPluginIDs []string,
+	dismissedPluginIDs []string,
+) (MarketplaceRecommendationResult, error) {
+	const command = "plugins.marketplace.recommendForWorkspace"
+	if workspaceFiles == nil {
+		workspaceFiles = []string{}
+	}
+	if catalogs == nil {
+		catalogs = []MarketplaceRecommendationCatalog{}
+	}
+	if installedPluginIDs == nil {
+		installedPluginIDs = []string{}
+	}
+	if dismissedPluginIDs == nil {
+		dismissedPluginIDs = []string{}
+	}
+	request := struct {
+		Platform           string                             `json:"platform"`
+		WorkspaceFiles     []string                           `json:"workspaceFiles"`
+		Catalogs           []MarketplaceRecommendationCatalog `json:"catalogs"`
+		HostCapabilities   map[string][]int                   `json:"hostCapabilities,omitempty"`
+		InstalledPluginIDs []string                           `json:"installedPluginIDs"`
+		DismissedPluginIDs []string                           `json:"dismissedPluginIDs"`
+	}{
+		Platform:           platform,
+		WorkspaceFiles:     workspaceFiles,
+		Catalogs:           catalogs,
+		HostCapabilities:   hostCapabilities,
+		InstalledPluginIDs: installedPluginIDs,
+		DismissedPluginIDs: dismissedPluginIDs,
+	}
+	var result marketplaceOutcome
+	if err := c.Execute(ctx, command, request, &result); err != nil {
+		return MarketplaceRecommendationResult{}, err
+	}
+	if err := result.failure(command); err != nil {
+		return MarketplaceRecommendationResult{}, err
+	}
+	if result.Recommendation == nil {
+		return MarketplaceRecommendationResult{}, newParseError(command, "marketplace returned no recommendations", "")
+	}
+	for i := range result.Recommendation.Plugins {
+		if result.Recommendation.Plugins[i].MarketplaceIndexURL != "" {
+			result.Recommendation.Plugins[i].Plugin.MarketplaceIndexURL = result.Recommendation.Plugins[i].MarketplaceIndexURL
+		}
+	}
+	return *result.Recommendation, nil
 }

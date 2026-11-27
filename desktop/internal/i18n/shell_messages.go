@@ -3,6 +3,7 @@ package i18n
 // toolMessages reads tools labels from the shared catalog.
 func toolMessages(language Language) ToolMessages {
 	return ToolMessages{
+		Output:        Shared(language, "desktop.pluginHost.output"),
 		Project:       Shared(language, "workbench.project"),
 		Commit:        Shared(language, "workbench.commit"),
 		Structure:     Shared(language, "desktop.tools.structure"),
@@ -18,6 +19,7 @@ func toolMessages(language Language) ToolMessages {
 		Debug:         Shared(language, "native.debug"),
 		Notifications: Shared(language, "notifications.title"),
 		Background:    Shared(language, "desktop.tools.background"),
+		Ports:         Shared(language, "desktop.remote.ports.title"),
 		ToolWindows:   Shared(language, "native.toolWindows"),
 		DragHint:      Shared(language, "desktop.tools.dragHint"),
 	}

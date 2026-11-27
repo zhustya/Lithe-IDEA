@@ -123,7 +123,7 @@ func (a *App) drawLogStripe(c ui.C, p *project) {
 		if a.gitIconButton(c, g.UpdateBranch, icons.ArrowDownLeft, false, !updatable || l.sync.busy) {
 			c.After(func() { a.updateBranch(p, target, surfaceButton) })
 		}
-		if a.gitIconButton(c, g.DeleteBranch, icons.Trash2, false, !deletable) {
+		if a.gitIconButton(c, g.DeleteBranch, icons.Trash2, false, a.branch.busy || !deletable) {
 			c.After(func() {
 				a.adoptLogBranches(p)
 				if several {
@@ -199,7 +199,7 @@ func (a *App) drawLogReferences(c ui.C, p *project) ui.Box {
 	v.refSel = l.refSelected
 	return ui.Column(c).FillHeight().Background(a.colors.Panel).Clip().Children(func() {
 		ui.Row(c).Height(logToolbarHeight).Shrink(0).Items(ui.Center).PadX(6).Children(func() {
-			ui.TextFieldID(c, logRefSearchID, &v.refSearch, g.BranchSearch, g.BranchSearch).Grow(1)
+			ui.TextField(c, &v.refSearch, g.BranchSearch, g.BranchSearch, ui.WithID(logRefSearchID)).Grow(1)
 		})
 		ui.Divider(c)
 		// A level starts an icon and a gap right of its parent, so a row's arrow or icon is under
@@ -318,7 +318,11 @@ func (a *App) appendLogNodes(rows []logRefRow, p *project, prefix, foreign strin
 // only fold or switch repository.
 func (v *logView) refNode(i int) ui.TreeNode {
 	r := v.refItems[i]
-	selected := (r.kind == logRefHead || r.kind == logRefReference) && (v.refSel == r.key || v.refMarks[r.key])
+	selected := v.refMarks[r.key]
+	if len(v.refMarks) == 0 && v.refAnchor == "" {
+		selected = v.refSel == r.key
+	}
+	selected = selected && (r.kind == logRefHead || r.kind == logRefReference)
 	return ui.TreeNode{Depth: r.depth, Branch: r.kind == logRefSection || r.kind == logRefFolder || r.kind == logRefRepository, Expanded: r.open, Selected: selected}
 }
 
@@ -564,7 +568,7 @@ func (a *App) drawLogToolbar(c ui.C, p *project) {
 		searchMin = logSearchWidth(v.barWidth, v.filtersWidth)
 	}
 	ui.Row(c).Height(logToolbarHeight).FillWidth().Shrink(0).Items(ui.Center).Gap(logBarGap).PadX(logBarPad).Draw(v.barDraw).Children(func() {
-		ui.TextFieldID(c, logSearchID, &v.search, g.TextOrHash, g.TextOrHash).MinWidth(searchMin).Grow(1).MaxWidth(320)
+		ui.TextField(c, &v.search, g.TextOrHash, g.TextOrHash, ui.WithID(logSearchID)).MinWidth(searchMin).Grow(1).MaxWidth(320)
 		ui.Row(c).Shrink(1).MinWidth(0).Clip().Items(ui.Center).Children(func() {
 			ui.Row(c).Shrink(0).Items(ui.Center).Gap(logBarGap).Draw(v.filtersDraw).Children(func() {
 				a.drawLogFilters(c, p)
@@ -854,6 +858,12 @@ func (a *App) drawLogChip(c ui.C, i int, label, value string, open bool) ui.Box 
 func (a *App) drawLogList(c ui.C, p *project) {
 	l, v, g := &p.log, &a.logView, a.text.Git
 	switch {
+	case p.git.safeMode:
+		a.safeModePanel(c, p, i18n.Shared(a.language(), "desktop.trust.gitSafeMode"))
+		return
+	case p.git.remoteAbove:
+		a.gitEmpty(c, i18n.Shared(a.language(), "desktop.remote.workspace.gitAbove"))
+		return
 	case !p.git.loaded || l.loading && len(l.commits) == 0:
 		a.gitEmpty(c, g.Loading)
 		return

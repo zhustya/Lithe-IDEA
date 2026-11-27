@@ -69,6 +69,10 @@ type Service struct {
 	toolchainKernel    toolchainProviderKernel
 	// ToolchainIssue records discovery failures that left declared fallback sources usable.
 	ToolchainIssue func(context.Context, error)
+	// BuildConfigurationIssue records native failures opening or rebinding configuration watches.
+	BuildConfigurationIssue func(context.Context, error)
+	// WorkspaceWatchIssue records native failures establishing or maintaining a workspace stream.
+	WorkspaceWatchIssue func(context.Context, error)
 	// providers2 holds the editor provider registrations of the window (hostproviders.go).
 	providers2 *editorProviderBindings
 	// actions holds the editor action registrations of the window (hostactions.go).
@@ -101,6 +105,12 @@ type Service struct {
 	Host *BackendHost
 	// Contexts holds the workspace contexts plugin backends see.
 	Contexts *WorkspaceContexts
+	// ContextIssue records a failed notification to an already running backend.
+	ContextIssue func(context.Context, error)
+	// contextsNotifyMu serializes didChangeContexts delivery with backend activation so a
+	// backend that starts after a workspace opens receives the latest revision once.
+	contextsNotifyMu sync.Mutex
+	contextsNotified map[string]workspaceNotificationRevision
 	// workbench is the window the document, editor, window and terminal services drive.
 	workbench Workbench
 	messages  *messageLimiter
@@ -112,7 +122,9 @@ type Service struct {
 	virtualHost VirtualDocumentHost
 	providers   *contentProviders
 	// resources are the subscriptions, providers and terminals backends hold.
-	resources *hostResources
+	resources   *hostResources
+	workflow    *workflowResources
+	viewRefresh viewRefreshRegistry
 	// Runs owns the processes backends start through run/start.
 	Runs *Runs
 	// LanguageTool resolves an optional installation for a backend-resolved
@@ -137,11 +149,28 @@ type Service struct {
 	// and the attempt it describes already went its own way.
 	RecordFailed func(ctx context.Context, err error)
 	// kernel reads what only Core can validate, such as a plugin's grammar.
-	kernel Kernel
+	kernel      Kernel
+	preferences *store.Store
 	// lsMu guards the running plugin-owned language servers backends reach.
 	lsMu          sync.Mutex
 	lsSessions    map[languageKey]*LanguageSession
 	lsGenerations map[languageKey]uint64
+}
+
+// ActivatePendingUpdates moves fully approved packages into the installed inventory at startup.
+func (s *Service) ActivatePendingUpdates(ctx context.Context) error {
+	return s.Installer.ActivatePending(ctx, s.Root, s.BeginRuntimeInstallation, func(ctx context.Context, id string) (string, error) {
+		entries, err := s.CurrentInstalled(ctx)
+		if err != nil {
+			return "", err
+		}
+		for _, entry := range entries {
+			if entry.Installed.ID == id && entry.Enabled {
+				return entry.Installed.Version, nil
+			}
+		}
+		return "", nil
+	})
 }
 
 // Open assembles the stack over one plugin root and one set of preferences.
@@ -196,6 +225,7 @@ func open(kernel Kernel, preferences *store.Store, root string, first bool) (*Se
 		HostServices:      hostServices,
 		Credentials:       credentials.Default(),
 		kernel:            kernel,
+		preferences:       preferences,
 		resources:         newHostResources(),
 		ledger:            ledger,
 		messages:          newMessageLimiter(),

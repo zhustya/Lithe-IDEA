@@ -23,7 +23,7 @@ func (a *App) drawLocalHistory(c ui.C, p *project) {
 	}
 	t := a.text.History
 	open := true
-	closed := ui.ModalWith(c, &open, t.Title, ui.ModalSpec{Width: 760, Description: h.rel}, func() {
+	closed := ui.Modal(c, &open, t.Title, ui.ModalSpec{Width: 760, Description: h.rel}, func() {
 		ui.Column(c.Part("local-history")).FillWidth().Gap(8).Children(func() {
 			if h.failure != "" {
 				ui.Paragraph(c, h.failure, 4).Color(a.theme.Danger)
@@ -52,10 +52,10 @@ func (a *App) drawLocalHistory(c ui.C, p *project) {
 						}
 						for i, line := range strings.SplitN(h.preview, "\n", localHistoryPreviewLines+1) {
 							if i == localHistoryPreviewLines {
-								ui.Text(c.KeyInt(i), "…").Muted()
+								ui.Text(c, "…").Muted()
 								break
 							}
-							ui.Text(c.KeyInt(i), line).Mono().FontSize(12).Color(a.colors.Text)
+							ui.Text(c, line).Mono().FontSize(12).Color(a.colors.Text)
 						}
 					})
 				})

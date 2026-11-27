@@ -34,6 +34,9 @@ type requestEnvelope struct {
 	GitExecution *gitExecution `json:"gitExecution,omitempty"`
 	// Origin is the user action the request belongs to, nil for none (see Origin).
 	Origin *requestOrigin `json:"origin,omitempty"`
+	// RemoteWorkspace is the host folder the request's workspace paths stand for, nil for a
+	// local request (WithRemoteWorkspace).
+	RemoteWorkspace *remoteWorkspace `json:"remoteWorkspace,omitempty"`
 }
 
 // gitExecution is the part of a request's Git policy the client sets (GitExecutionOptions in
@@ -49,6 +52,14 @@ type gitExecution struct {
 	// Source is the request's provenance: "background" for an automatic refresh, whose
 	// queries Core keeps silent unless QueryCategory names them; empty for unknown.
 	Source string `json:"source,omitempty"`
+	// ProjectCodeAllowed is false for a request of a workspace the user has not trusted
+	// (WithProjectCodeAllowed): Core starts no Git process for it and answers
+	// CodeGitUntrustedWorkspace. Nil keeps Core's default, which allows Git.
+	ProjectCodeAllowed *bool `json:"projectCodeAllowed,omitempty"`
+	// Interactive lets the Git processes the user sees ask for credentials through Lithe
+	// (WithGitAuthentication). Core then requires the request to observe execution events,
+	// which carry the questions.
+	Interactive bool `json:"interactive,omitempty"`
 }
 
 // responseEnvelope is the response the kernel encodes (CoreResponse in the Rust protocol).
@@ -105,13 +116,19 @@ func (c *Client) execute(ctx context.Context, command string, payload, result an
 	if payload == nil {
 		payload = struct{}{}
 	}
+	remote, binding, session, err := remoteWorkspaceRequest(ctx, command)
+	if err != nil {
+		return nil, err
+	}
 	operationID := fmt.Sprintf("desktop-%d", nextCoreOperation.Add(1))
+	execution := gitExecutionOf(ctx, command)
 	request, err := json.Marshal(requestEnvelope{
-		OperationID:  operationID,
-		Command:      command,
-		Payload:      payload,
-		GitExecution: gitExecutionOf(ctx, command),
-		Origin:       requestOriginOf(ctx),
+		OperationID:     operationID,
+		Command:         command,
+		Payload:         payload,
+		GitExecution:    execution,
+		Origin:          requestOriginOf(ctx),
+		RemoteWorkspace: remote,
 	})
 	if err != nil {
 		return nil, &Error{
@@ -128,13 +145,25 @@ func (c *Client) execute(ctx context.Context, command string, payload, result an
 	}
 	// A Git request of a context with a console is observed so its commands are recorded.
 	observer = gitConsoleObserver(ctx, command, request, observer)
+	if execution != nil && execution.Interactive {
+		// The questions of an interactive request arrive as its events, and Core refuses one
+		// that observes none. Closing returned tells each open question that no answer reaches
+		// its request any more.
+		returned := make(chan struct{})
+		defer close(returned)
+		observer = gitAuthenticationObserver(gitAuthenticationOf(ctx, command), returned, observer)
+	}
 	if observer == nil {
-		return nil, decodeResponse(ctx, command, call(ctx, operationID, request), result)
+		err = decodeResponse(ctx, command, call(ctx, operationID, request), result)
+		remoteWorkspaceAnswered(binding, session, err)
+		return nil, err
 	}
 	stop := watchCancellation(ctx, operationID)
 	defer stop()
 	response, observationErr := executeJSONWithEvents(request, observer)
-	return observationErr, decodeResponse(ctx, command, response, result)
+	err = decodeResponse(ctx, command, response, result)
+	remoteWorkspaceAnswered(binding, session, err)
+	return observationErr, err
 }
 
 // call sends one encoded request while a watcher forwards cancellation of ctx to the kernel.

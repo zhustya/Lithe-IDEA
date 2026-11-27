@@ -248,7 +248,13 @@ func (a *App) attachDebugForRun(ctx context.Context, request pluginservice.RunDe
 						target:  &core.DebugTargetFacts{Kind: "connection", Host: request.Host, Port: request.Port},
 						stopRun: request.StopRun,
 					})
-					result <- outcome{id: p.debug.activeSession().id}
+					session := p.debug.activeSession()
+					if session == nil {
+						result <- outcome{err: errors.New("the debug session did not start")}
+						return
+					}
+					a.openToolWindow(itemDebug)
+					result <- outcome{id: session.id}
 					return
 				}
 			}
@@ -519,7 +525,7 @@ func (a *App) beginDebug(p *project, start debugStart) {
 		// Assigned only by startup; cleanup reads it after startupDone closes.
 		session.stateDirectory = stateDirectory
 		preparationContext, cancelPreparation := context.WithTimeout(ctx, debugOperationTimeout)
-		prepared, err := a.prepareDebugLaunch(preparationContext, start, session.stateDirectory, p.root, targetPath, generation, targetUnavailable)
+		prepared, err := a.prepareDebugLaunch(preparationContext, start, session.stateDirectory, p, targetPath, generation, targetUnavailable)
 		if err != nil {
 			// Only the adapter's own launch is the plugin's start; a debuggee that cannot be
 			// found or a remote endpoint waiting for the user is not. The preparation's
@@ -645,7 +651,7 @@ func (a *App) beginDebug(p *project, start debugStart) {
 // Core owns the length of the window (the transport policy's initialization
 // deadline); the host only runs the clock.
 func (a *App) watchDebugInitialize(p *project, session *debugSession, window time.Duration) {
-	timer := time.AfterFunc(window, func() {
+	timeout := func() {
 		// The window is the start's deadline: an adapter start that has no result by now
 		// timed out. A start that already ended keeps its result.
 		a.recordDebugStart(session.ctx, session, core.StageTimeout, context.DeadlineExceeded)
@@ -660,7 +666,19 @@ func (a *App) watchDebugInitialize(p *project, session *debugSession, window tim
 				a.finishDebugError(p, session, errors.New(a.text.Debug.TimedOut))
 			}
 		})
-	})
+	}
+	if a.debugInitializeTrigger != nil {
+		trigger := a.debugInitializeTrigger
+		go func() {
+			select {
+			case <-trigger:
+				timeout()
+			case <-session.ctx.Done():
+			}
+		}()
+		return
+	}
+	timer := time.AfterFunc(window, timeout)
 	// The timer must not outlive the session: Stop and shutdown cancel its context.
 	context.AfterFunc(session.ctx, func() { timer.Stop() })
 }

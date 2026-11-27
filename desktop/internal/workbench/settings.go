@@ -7,15 +7,18 @@ import (
 	"runtime"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/buildinfo"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/cli"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/fileassociations"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/fontprefs"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/localshell"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/marketplace"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
-	"github.com/1lck/Lithe-IDEA/desktop/internal/processledger"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginicons"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/settingswindow"
 	"github.com/vivaui/viva/app"
+	"github.com/vivaui/viva/gfx"
 )
 
 // newSettingsWindow makes the controller of the settings window. The settings are a window
@@ -23,7 +26,7 @@ import (
 // own thread (the language and the look of the frame last painted) and two ways back into
 // the workbench, both of which only queue the work for the workbench's window thread.
 func (a *App) newSettingsWindow() *settingswindow.Controller {
-	service := marketplace.New(a.kernel, nil)
+	service := a.pinnedMarketplace()
 	var navigation func(context.Context, []core.SettingsNavigationItem, string) ([]core.SettingsNavigationRow, error)
 	if kernel, ok := a.kernel.(interface {
 		SettingsNavigation(context.Context, []core.SettingsNavigationItem, string) ([]core.SettingsNavigationRow, error)
@@ -31,6 +34,15 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 		navigation = kernel.SettingsNavigation
 	}
 	return settingswindow.NewController(settingswindow.Options{
+		CLI:              cli.New(),
+		CLIAction:        func(action string) { a.post(func(a *App) { a.performed("settings.cli."+action, surfaceButton) }) },
+		FileAssociations: fileassociations.New(),
+		AssociationAction: func(ctx context.Context, action string) context.Context {
+			return a.performedIn(ctx, "settings.fileAssociations."+action, surfaceButton)
+		},
+		AssociationError: func(ctx context.Context, err error) {
+			a.operationFailedIn(ctx, "file_associations", err)
+		},
 		SearchPreferences: appSearchPreferences{app: a},
 		PluginInstallsClosed: func() {
 			a.post(func(a *App) { a.closePluginDownloads() })
@@ -53,6 +65,9 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 			a.post(func(a *App) { a.restartSettingsPlugin(id, version, scope, workspace) })
 		},
 		MarketplaceInstalled: func(ctx context.Context) (marketplace.Snapshot, error) {
+			if a.plugins == nil {
+				return marketplace.Snapshot{}, nil
+			}
 			plugins, err := a.plugins.SettingsCatalog(ctx)
 			if err != nil {
 				if plugins == nil {
@@ -69,7 +84,20 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 			}
 			return service.Fetch(ctx, marketplace.CommunityRepositoryURL, core.MarketplaceThirdParty, runtime.GOOS+"-"+arch, pluginhost.Declared().Clone())
 		},
-		MarketplaceURL:         marketplace.CommunityRepositoryURL,
+		MarketplaceURL: marketplace.CommunityRepositoryURL,
+		MarketplaceIcon: func(ctx context.Context, address string) (gfx.Icon, error) {
+			data, err := service.FetchIcon(ctx, address, pluginicons.MaxFileBytes)
+			if err != nil {
+				return gfx.Icon{}, err
+			}
+			if err := ctx.Err(); err != nil {
+				return gfx.Icon{}, err
+			}
+			return pluginicons.CompileSVG(address, data)
+		},
+		MarketplaceIconError: func(err error) {
+			a.backgroundFailedIn(context.Background(), "plugin_marketplace_icon", err)
+		},
 		OfficialMarketplaceURL: marketplace.OfficialIndexURL,
 		MarketplaceOfficial: func(ctx context.Context) (marketplace.Snapshot, error) {
 			arch := runtime.GOARCH
@@ -89,6 +117,9 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 		},
 		MarketplaceResized: func(width float32) {
 			a.post(func(a *App) { a.setMarketplaceWidth(width) })
+		},
+		WindowResized: func(width, height int) {
+			a.post(func(a *App) { a.setSettingsWindowSize(width, height) })
 		},
 		// The plugin page paints from memory and hands every action back, so the
 		// window never installs, enables or removes anything on its own thread.
@@ -139,6 +170,7 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 		UninstallPlugin: func(id string) {
 			a.post(func(a *App) { a.uninstallPlugin(id) })
 		},
+		PluginReleases:  a.pluginReleases,
 		CommandInstalls: settingsCommandInstalls{app: a},
 		Language: func() i18n.Language {
 			if a.shared.text.Load() == i18n.For(i18n.Chinese) {
@@ -200,6 +232,9 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 		SetDisableSemanticHighlight: func(value bool) {
 			a.post(func(a *App) { a.setDisableSemanticHighlight(value) })
 		},
+		SetDisableAutoCompletion: func(value bool) {
+			a.post(func(a *App) { a.setDisableAutoCompletion(value) })
+		},
 		SetVimMode: func(value bool) {
 			a.post(func(a *App) { a.setVimMode(value) })
 		},
@@ -232,7 +267,6 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 			a.post(func(a *App) { a.setConsoleEncoding(value) })
 		},
 		ConsoleEncodings:         a.consoleEncodingsOption,
-		SweepsLeftovers:          processledger.Supported,
 		SteppingAdapters:         a.steppingAdapters,
 		NormalizeSteppingFilters: a.kernel.NormalizeSteppingFilters,
 		SetSteppingFilters: func(adapter string, filters *core.DebugSteppingFilters) {
@@ -312,14 +346,7 @@ func (a *App) newSettingsWindow() *settingswindow.Controller {
 		LocalHistory: a.localHistorySettingsSource(),
 		SetEditorPreferences: func(stored core.EditorStoredPreferences, resolved core.EditorPreferences) {
 			a.post(func(a *App) {
-				a.settings.EditorPreferences = stored
-				inlayChanged := a.editorPreferences.InlayHints != resolved.InlayHints
-				a.editorPreferences = resolved
-				if inlayChanged {
-					a.applyInlayHintsPreference(resolved.InlayHints)
-				}
-				a.saveSettings()
-				a.invalidator.Invalidate()
+				a.setEditorPreferences(stored, resolved)
 			})
 		},
 		SetKeymapSchemes: func(value core.KeymapSchemeResult) {
@@ -362,6 +389,32 @@ func (a *App) setMarketplaceWidth(width float32) {
 	}
 }
 
+// setSettingsWindowSize keeps the size the user gave the settings window, which the next one
+// opens at. Every project tab of the window holds its own copy of the settings and saves it
+// whole, so each tab takes the size: the next window opens at it whichever tab opens it, and no
+// tab writes the old size back. One owner for the settings of every tab and window (#1851)
+// replaces this.
+func (a *App) setSettingsWindowSize(width, height int) {
+	if a.settings.SettingsWindowWidth == width && a.settings.SettingsWindowHeight == height {
+		return
+	}
+	for _, tab := range a.sessions.everyOne() {
+		tab.settings.SettingsWindowWidth, tab.settings.SettingsWindowHeight = width, height
+	}
+	a.settings.SettingsWindowWidth, a.settings.SettingsWindowHeight = width, height
+	a.saveSettings()
+}
+
+// closeSettingsWindow closes the open settings window as this workbench closes. It keeps the
+// size the user gave the window first, because the window reports it only once it has
+// closed, to a queue this workbench no longer drains.
+func (a *App) closeSettingsWindow() {
+	if width, height, ok := a.settingsWindow.ResizedWindow(); ok {
+		a.setSettingsWindowSize(width, height)
+	}
+	a.settingsWindow.Close()
+}
+
 // invalidateSettingsWindow repaints the open settings window after state one of its pages
 // reads changed off that window's thread.
 func (a *App) invalidateSettingsWindow() {
@@ -387,7 +440,7 @@ func (a *App) openPluginSettings(surface actionSurface) {
 
 // openPluginSettingsSearch shows the plugin page with the marketplace search set to query.
 func (a *App) openPluginSettingsSearch(surface actionSurface, query string) {
-	a.openSettingsPageWith(surface, settingsPlugins, query)
+	a.openSettingsPageWith(surface, settingsMarketplace, query)
 }
 
 // openTerminalSettings shows the settings window on its Terminal page, where the shell new
@@ -408,15 +461,16 @@ const (
 	// settingsHome opens the window where it was left, or on its first page.
 	settingsHome settingsPage = iota
 	settingsPlugins
+	settingsMarketplace
 	settingsTerminal
 	// settingsAI is the AI page, where the providers a commit message is generated with are
 	// configured.
 	settingsAI
 	// settingsKeymap is the Keymap page, which the gear menu's Keymap item opens.
 	settingsKeymap
-	// settingsVersionControl is the Version Control page, which the Git console's settings
-	// button opens.
-	settingsVersionControl
+	// settingsGit is the Git page under Version Control, which the settings buttons of the Git
+	// console and the Git Log open.
+	settingsGit
 	// settingsToolchainsPage is the Toolchains page, where a build's options dialog leads to the
 	// runtime its builds and launches use.
 	settingsToolchainsPage
@@ -424,6 +478,51 @@ const (
 
 func (a *App) openSettingsPage(surface actionSurface, page settingsPage) {
 	a.openSettingsPageWith(surface, page, "")
+}
+
+// publishWorkspaceBuildOptions refreshes settings links after detection or a project change.
+func (a *App) publishWorkspaceBuildOptions(p *project) {
+	if a.settingsWindow == nil {
+		return
+	}
+	a.settingsWindow.SetWorkspaceBuildOptions(a.workspaceBuildOptions(p))
+}
+
+func (a *App) workspaceBuildOptions(p *project) map[string][]settingswindow.WorkspaceBuildOptions {
+	if p == nil {
+		return nil
+	}
+	options := make(map[string][]settingswindow.WorkspaceBuildOptions)
+	for i := range p.build.instances {
+		instance := &p.build.instances[i]
+		if !instance.hasDeclaredOptions() {
+			continue
+		}
+		id, system, plugin := instance.ID, instance.BuildSystemID, instance.PluginID
+		options[system] = append(options[system], settingswindow.WorkspaceBuildOptions{
+			InstanceID: id, PluginID: plugin, Name: buildSystemName(instance), Root: buildRootDetail(instance),
+			Open: func() {
+				a.post(func(a *App) {
+					if a.project != p {
+						return
+					}
+					current := p.buildInstanceByID(id)
+					if current == nil || current.BuildSystemID != system || current.PluginID != plugin || !current.hasDeclaredOptions() {
+						return
+					}
+					// An open editor can contain unsaved changes. Bring it forward intact.
+					if !p.build.options.open {
+						a.performed("build.options.open", surfaceButton)
+						a.openBuildOptions(p, current)
+					}
+					if a.window != nil {
+						a.window.Show()
+					}
+				})
+			},
+		})
+	}
+	return options
 }
 
 // openSettingsPageWith is openSettingsPage with the marketplace search text the plugin page starts with.
@@ -435,7 +534,7 @@ func (a *App) openSettingsPageWith(surface actionSurface, page settingsPage, que
 	if a.application == nil {
 		return
 	}
-	if page == settingsPlugins {
+	if page == settingsPlugins || page == settingsMarketplace {
 		a.reloadPluginLanguages()
 	}
 	a.post(func(a *App) {
@@ -444,6 +543,7 @@ func (a *App) openSettingsPageWith(surface actionSurface, page settingsPage, que
 		}
 		current := settingswindow.Values{
 			Language: a.settings.Language, Theme: string(a.settings.Theme), MarketplaceWidth: a.settings.MarketplaceWidth,
+			WindowWidth: a.settings.SettingsWindowWidth, WindowHeight: a.settings.SettingsWindowHeight,
 			EditorTabRows: a.settings.EditorTabRows, EditorTabOverflow: a.settings.EditorTabOverflow,
 			EditorTabLimit: settingswindow.TabLimitOf(a.settings.EditorTabLimit), EditorTabPolicy: a.settings.EditorTabPolicy,
 			TerminalShell: a.settings.TerminalShell, TerminalScrollback: a.terminalScrollback(),
@@ -455,6 +555,7 @@ func (a *App) openSettingsPageWith(surface actionSurface, page settingsPage, que
 			GitLogLimit: a.gitLogLimit(), GitLogMergedLimit: a.gitLogMergedLimit(),
 			GitConsole:               a.settings.GitConsole,
 			DisableSemanticHighlight: a.settings.DisableSemanticHighlight,
+			DisableAutoCompletion:    a.settings.DisableAutoCompletion,
 			VimMode:                  a.settings.VimMode,
 			DisableAutoSave:          a.settings.DisableAutoSave,
 			DisableSearchIndexOnOpen: a.settings.DisableSearchIndexOnOpen,
@@ -472,19 +573,17 @@ func (a *App) openSettingsPageWith(surface actionSurface, page settingsPage, que
 		var err error
 		switch page {
 		case settingsPlugins:
-			if query != "" {
-				err = a.settingsWindow.OpenPluginsWithQuery(a.application, current, query)
-			} else {
-				err = a.settingsWindow.OpenPlugins(a.application, current)
-			}
+			err = a.settingsWindow.OpenPlugins(a.application, current)
+		case settingsMarketplace:
+			err = a.settingsWindow.OpenPluginsWithQuery(a.application, current, query)
 		case settingsTerminal:
 			err = a.settingsWindow.OpenTerminal(a.application, current)
 		case settingsKeymap:
 			err = a.settingsWindow.OpenKeymap(a.application, current)
 		case settingsAI:
 			err = a.settingsWindow.OpenAI(a.application, current)
-		case settingsVersionControl:
-			err = a.settingsWindow.OpenVersionControl(a.application, current)
+		case settingsGit:
+			err = a.settingsWindow.OpenGit(a.application, current)
 		case settingsToolchainsPage:
 			err = a.settingsWindow.OpenToolchains(a.application, current)
 		default:

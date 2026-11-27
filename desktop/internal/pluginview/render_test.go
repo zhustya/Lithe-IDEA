@@ -49,6 +49,8 @@ func paintView(t *testing.T, b *backend, s *Session) *viewDriver {
 		Theme:       &theme,
 		Background:  &background,
 		Invalidator: invalidator,
+		// Every client window the view is drawn in turns these on.
+		EllipsisTooltips: true,
 	})
 	driver, err := app.NewDriver(ui.Configure(page, app.Config{Width: 480, Height: 400, Invalidator: invalidator}), nil)
 	if err != nil {
@@ -140,6 +142,16 @@ func TestDrawSendsChangeForAToggleWithItsValue(t *testing.T) {
 	d.click("Watch files")
 	if event := d.sent(); event["event"] != "change" || event["node"] != "watch" || event["value"] != true {
 		t.Fatalf("event = %v, want change of watch to true", event)
+	}
+}
+
+func TestDrawSendsChangeForASegmentedChoice(t *testing.T) {
+	d := drawView(t, `[{"type":"segmented","id":"mode","label":"Mode","value":"first","options":[
+		{"value":"first","label":"First"},{"value":"second","label":"Second"}
+	]}]`)
+	d.click("Second")
+	if event := d.sent(); event["event"] != "change" || event["node"] != "mode" || event["value"] != "second" {
+		t.Fatalf("event = %v, want change of mode to second", event)
 	}
 }
 

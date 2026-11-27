@@ -18,6 +18,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.run_id || github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+env:
+  # Use the release Core in CI too: Lithe-IDEA tests Go code against a pinned Core revision,
+  # so sharing the ~36 MiB staged release Core across CI, AutoBuild and Release eliminates the
+  # 700+ MiB debug staticlib, speeds up cgo linking, and pre-warms release caches for free.
+  LITHE_DESKTOP_CORE_PROFILE: release
+  CARGO_INCREMENTAL: 0
+
 jobs:
   pins:
     name: Verify pins
@@ -69,8 +76,10 @@ jobs:
         run: |
           bash -n scripts/desktop/check.sh
           bash -n scripts/desktop/build-desktop-core.sh
+          bash -n scripts/desktop/build-remote-server.sh
           bash -n scripts/desktop/desktop-go.sh
           bash -n scripts/desktop/package-desktop.sh
+          bash -n scripts/desktop/generate-file-associations.sh
           bash -n scripts/desktop/build-viva-tool.sh
           bash -n scripts/desktop/perf/editor-bench.sh
           bash -n scripts/ci/desktop-release/package-release.sh
@@ -86,8 +95,10 @@ jobs:
           shellcheck -S warning \
             scripts/desktop/check.sh \
             scripts/desktop/build-desktop-core.sh \
+            scripts/desktop/build-remote-server.sh \
             scripts/desktop/desktop-go.sh \
             scripts/desktop/package-desktop.sh \
+            scripts/desktop/generate-file-associations.sh \
             scripts/desktop/build-viva-tool.sh \
             scripts/desktop/perf/editor-bench.sh \
             scripts/ci/desktop-release/package-release.sh \
@@ -125,9 +136,11 @@ jobs:
           node --test \
             scripts/release/notes/test-validate-stable-release-notes.mjs \
             scripts/desktop/package-desktop.test.mjs \
+            scripts/desktop/verify/verify-remote-server-artifacts.test.mjs \
             scripts/desktop/perf/editor-perf-report.test.mjs \
             scripts/ci/cancel-closed-pr-runs/cancel-closed-pr-runs.test.mjs \
-            scripts/ci/desktop-ci/verify-ci-gate.test.mjs
+            scripts/ci/desktop-ci/verify-ci-gate.test.mjs \
+            scripts/install/linux.test.mjs
           node --test --test-concurrency=1 scripts/ci/desktop-autobuild/package-autobuild.test.mjs scripts/ci/common/desktop-packages.test.mjs scripts/ci/desktop-release/package-release.test.mjs scripts/ci/desktop-release/resolve-release-version.test.mjs scripts/ci/desktop-release/publish-update-feed.test.mjs
 
   linux-test:
@@ -149,7 +162,25 @@ jobs:
         id: rust
         uses: dtolnay/rust-toolchain@1.100.0
 
+      - name: Resolve pinned Core revision
+        id: core-pin
+        run: |
+          rev="$(sed -n 's/^PINNED_CORE_REVISION="\([0-9a-f]\{40\}\)"$/\1/p' scripts/desktop/build-desktop-core.sh)"
+          if [[ -z "$rev" ]]; then
+            printf '%s\n' 'Could not read PINNED_CORE_REVISION from scripts/desktop/build-desktop-core.sh.' >&2
+            exit 1
+          fi
+          printf 'revision=%s\n' "$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Restore staged release Core
+        id: core-stage
+        uses: actions/cache@v6
+        with:
+          path: .artifacts/desktop/lithe-core/x86_64-unknown-linux-gnu/release
+          key: desktop-core-staged-x86_64-unknown-linux-gnu-${{ steps.rust.outputs.cachekey }}-release-${{ steps.core-pin.outputs.revision }}
+
       - name: Restore the core build
+        if: steps.core-stage.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -157,14 +188,45 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             .artifacts/desktop/lithe-core-rust
-          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-x86_64-unknown-linux-gnu-debug-${{ hashFiles('scripts/desktop/build-desktop-core.sh') }}
+          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-x86_64-unknown-linux-gnu-${{ steps.core-pin.outputs.revision }}
           restore-keys: |
-            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-x86_64-unknown-linux-gnu-debug-
+            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-x86_64-unknown-linux-gnu-
+
+      - name: Ensure Core fixtures checkout
+        run: ./scripts/desktop/build-desktop-core.sh --checkout-only > /dev/null
+
+      - name: Stage release Core
+        run: ./scripts/desktop/desktop-go.sh --print-core-stage > /dev/null
 
       - name: Verify Core cgo cache invalidation
         run: |
           mkdir -p .artifacts/test-stability
           node --test --test-reporter=junit --test-reporter-destination=.artifacts/test-stability/core-cache.junit.xml scripts/desktop/desktop-core-cache.test.mjs
+
+      - name: Install CJK fonts for visual evidence
+        timeout-minutes: 3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+          fc-match 'sans-serif:lang=zh-cn'
+
+      - name: Capture plugin workflow surfaces
+        id: plugin-workflow-visual
+        timeout-minutes: 5
+        env:
+          LITHE_VISUAL_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/plugin-workflow-visual
+        run: |
+          ./scripts/desktop/desktop-go.sh test -tags 'vivahead lithevisual' ./internal/workbench \
+            -run '^TestVisualPluginWorkflow$' -count=1 -timeout=90s
+
+      - name: Upload plugin workflow screenshots
+        if: ${{ !cancelled() && steps.plugin-workflow-visual.outcome != 'skipped' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin-workflow-visual-${{ runner.os }}-${{ runner.arch }}
+          path: .artifacts/plugin-workflow-visual/*.png
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Vet and test
         run: ./scripts/desktop/check.sh
@@ -197,7 +259,7 @@ jobs:
           LITHE_VISUAL_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/lsp-editor-visual
         run: |
           ./scripts/desktop/desktop-go.sh test -v -tags 'vivahead lithevisual' ./internal/workbench \
-            -run '^(TestLSP|TestCompletionPopup|TestVisual(LSPActions|CompletionPopup)$)' -count=1 -timeout=120s
+            -run '^(TestLSP|TestCompletionPopup|TestVisual(LSPActions|CompletionPopup|HoverContentsContract)$)' -count=1 -timeout=120s
 
       - name: Upload LSP editor screenshots
         if: ${{ !cancelled() && steps.lsp-visual.outcome != 'skipped' }}
@@ -249,6 +311,63 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Capture project tree focus regression
+        id: project-tree-visual
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          LITHE_VISUAL_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/project-tree-visual
+        run: |
+          ./scripts/desktop/desktop-go.sh test -tags 'vivahead lithevisual' ./internal/workbench \
+            -run '^TestVisualProjectTreeMissingFile$' -count=1 -timeout=120s
+
+      - name: Upload project tree screenshots
+        if: ${{ !cancelled() && steps.project-tree-visual.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: project-tree-visual-${{ runner.os }}-${{ runner.arch }}
+          path: .artifacts/project-tree-visual/*.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Capture run performance screenshots
+        id: run-performance-visual
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          LITHE_VISUAL_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/run-performance-visual
+        run: |
+          ./scripts/desktop/desktop-go.sh test -tags 'vivahead lithevisual' ./internal/workbench \
+            -run '^TestVisualRunConsoleWrap$' -count=1 -timeout=120s
+
+      - name: Upload run performance screenshots
+        if: ${{ !cancelled() && steps.run-performance-visual.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: run-performance-visual-${{ runner.os }}-${{ runner.arch }}
+          path: .artifacts/run-performance-visual/*.png
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Capture new project field descriptions
+        id: new-project-visual
+        if: ${{ !cancelled() && steps.rust.outcome == 'success' }}
+        timeout-minutes: 5
+        env:
+          LITHE_VISUAL_OUTPUT_DIR: ${{ github.workspace }}/.artifacts/new-project-visual
+        run: |
+          ./scripts/desktop/desktop-go.sh test -tags 'vivahead lithevisual' ./internal/workbench \
+            -run '^TestVisualNewProjectFieldDescriptions$' -count=1 -timeout=120s
+
+      - name: Upload new project screenshots
+        if: ${{ !cancelled() && steps.new-project-visual.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: new-project-visual-${{ runner.os }}-${{ runner.arch }}
+          path: .artifacts/new-project-visual/*.png
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Upload native verification reports
         if: always()
         uses: actions/upload-artifact@v7
@@ -257,6 +376,13 @@ jobs:
           path: .artifacts/test-stability/
           if-no-files-found: warn
           retention-days: 14
+
+  # Builds the remote workspace server for linux amd64 and arm64 in one job, then smoke tests
+  # each on a runner of its own architecture. Desktop Release and Desktop AutoBuild call the same
+  # workflow and embed the artifact it uploads.
+  remote-server:
+    name: Remote server
+    uses: ./.github/workflows/desktop-remote-server.yml
 
   macos:
     name: Vet and test on macOS
@@ -280,19 +406,41 @@ jobs:
         id: rust
         uses: dtolnay/rust-toolchain@1.100.0
 
-      - name: Restore the core build
+      - name: Resolve pinned Core revision
+        id: core-pin
+        run: |
+          rev="$(sed -n 's/^PINNED_CORE_REVISION="\([0-9a-f]\{40\}\)"$/\1/p' scripts/desktop/build-desktop-core.sh)"
+          if [[ -z "$rev" ]]; then
+            printf '%s\n' 'Could not read PINNED_CORE_REVISION from scripts/desktop/build-desktop-core.sh.' >&2
+            exit 1
+          fi
+          printf 'revision=%s\n' "$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Restore staged release Core
+        id: core-stage
         uses: actions/cache@v6
         with:
-          # The pinned revision lives in build-desktop-core.sh, so its hash keys the checkout and
-          # target directory; cargo rebuilds whatever a different toolchain invalidates.
+          path: .artifacts/desktop/lithe-core/aarch64-apple-darwin/release
+          key: desktop-core-staged-aarch64-apple-darwin-${{ steps.rust.outputs.cachekey }}-release-${{ steps.core-pin.outputs.revision }}
+
+      - name: Restore the core build
+        if: steps.core-stage.outputs.cache-hit != 'true'
+        uses: actions/cache@v6
+        with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             .artifacts/desktop/lithe-core-rust
-          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-debug-${{ hashFiles('scripts/desktop/build-desktop-core.sh') }}
+          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-aarch64-apple-darwin-${{ steps.core-pin.outputs.revision }}
           restore-keys: |
-            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-debug-
+            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-aarch64-apple-darwin-
+
+      - name: Ensure Core fixtures checkout
+        run: ./scripts/desktop/build-desktop-core.sh --checkout-only > /dev/null
+
+      - name: Stage release Core
+        run: ./scripts/desktop/desktop-go.sh --print-core-stage > /dev/null
 
       - name: Verify Core cgo cache invalidation
         run: |
@@ -368,22 +516,29 @@ jobs:
           targets: x86_64-pc-windows-gnu
 
       - name: Ensure MinGW-w64
+        uses: ./.github/actions/setup-desktop-windows-build-tools
+        with:
+          nsis: 'false'
+
+      - name: Resolve pinned Core revision
+        id: core-pin
         run: |
-          if ! command -v gcc >/dev/null 2>&1; then
-            choco install mingw -y
-            gcc_path="$(find /c/ProgramData/chocolatey/lib/mingw /c/tools/mingw64 /c/mingw64 \
-              -type f -name gcc.exe -print -quit 2>/dev/null || true)"
-            if [[ -z "$gcc_path" ]]; then
-              printf '%s\n' 'MinGW-w64 installation did not provide gcc.exe.' >&2
-              exit 1
-            fi
-            mingw_bin="$(dirname "$gcc_path")"
-            export PATH="$mingw_bin:$PATH"
-            printf '%s\n' "$(cygpath -m "$mingw_bin")" >> "$GITHUB_PATH"
+          rev="$(sed -n 's/^PINNED_CORE_REVISION="\([0-9a-f]\{40\}\)"$/\1/p' scripts/desktop/build-desktop-core.sh)"
+          if [[ -z "$rev" ]]; then
+            printf '%s\n' 'Could not read PINNED_CORE_REVISION from scripts/desktop/build-desktop-core.sh.' >&2
+            exit 1
           fi
-          gcc --version
+          printf 'revision=%s\n' "$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Restore staged release Core
+        id: core-stage
+        uses: actions/cache@v6
+        with:
+          path: .artifacts/desktop/lithe-core/x86_64-pc-windows-gnu/release
+          key: desktop-core-staged-x86_64-pc-windows-gnu-${{ steps.rust.outputs.cachekey }}-release-${{ steps.core-pin.outputs.revision }}
 
       - name: Restore the core build
+        if: steps.core-stage.outputs.cache-hit != 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -391,9 +546,15 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             .artifacts/desktop/lithe-core-rust
-          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-x86_64-pc-windows-gnu-debug-${{ hashFiles('scripts/desktop/build-desktop-core.sh') }}
+          key: desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-x86_64-pc-windows-gnu-${{ steps.core-pin.outputs.revision }}
           restore-keys: |
-            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-x86_64-pc-windows-gnu-debug-
+            desktop-core-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust.outputs.cachekey }}-release-x86_64-pc-windows-gnu-
+
+      - name: Ensure Core fixtures checkout
+        run: ./scripts/desktop/build-desktop-core.sh --checkout-only > /dev/null
+
+      - name: Stage release Core
+        run: ./scripts/desktop/desktop-go.sh --print-core-stage > /dev/null
 
       - name: Verify Core cgo cache invalidation
         run: |
@@ -445,7 +606,7 @@ jobs:
 
   gate:
     name: Desktop CI gate
-    needs: [pins, linux, linux-test, macos, windows]
+    needs: [pins, linux, linux-test, remote-server, macos, windows]
     # Aggregate failures as well as successes; missing dependencies fail closed.
     if: always()
     runs-on: ubuntu-latest

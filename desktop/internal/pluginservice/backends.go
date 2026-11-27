@@ -27,6 +27,10 @@ type BackendRequest struct {
 	Context ContextRef
 	// Architecture is the platform architecture Core plans for.
 	Architecture string
+	// ProjectCodeAllowed is whether the user trusts the workspace. Without it Core plans no
+	// language server that would run project code, and the start fails with
+	// core.LaunchUntrustedWorkspace.
+	ProjectCodeAllowed bool
 	// RuntimeProgress reports cancellable preparation before the bounded server
 	// launch. It may be called from a worker goroutine.
 	RuntimeProgress func(pluginruntime.Progress)
@@ -57,6 +61,9 @@ type LanguageSession struct {
 	// temporary is the scratch directory of one backend-resolved start; it is
 	// removed when the process ends.
 	temporary string
+	// launch is set when the backend's launch answer carried the server's
+	// workspace configuration; an immediate setting change asks it again.
+	launch *launchConfiguration
 	languageSessionState
 }
 
@@ -116,22 +123,24 @@ func (s *Service) StartLanguageServer(ctx context.Context, entries []pluginmanag
 		return fail(stateErr)
 	}
 	start := pluginbackend.StartRequest{
-		Manifest:         manifest,
-		PackageDirectory: entry.Installed.Path,
-		PluginID:         entry.Installed.ID,
-		ProviderID:       entry.Installed.ID + "/language-server",
-		LanguageID:       languageID,
-		Attempt:          attempt,
-		StateDirectory:   stateDirectory,
-		LogDirectory:     s.logDirectory(ctx, entry.Installed.ID),
-		Architecture:     request.Architecture,
-		Settings:         settings.State.Settings,
-		ProjectSettings:  settings.State.ProjectSettings,
-		RootURI:          request.RootURI,
-		WorkingDirectory: request.WorkingDirectory,
-		ManagedTools:     runtimes.Tools,
+		Manifest:           manifest,
+		PackageDirectory:   entry.Installed.Path,
+		PluginID:           entry.Installed.ID,
+		ProviderID:         entry.Installed.ID + "/language-server",
+		LanguageID:         languageID,
+		Attempt:            attempt,
+		StateDirectory:     stateDirectory,
+		LogDirectory:       s.logDirectory(ctx, entry.Installed.ID),
+		Architecture:       request.Architecture,
+		Settings:           settings.State.Settings,
+		ProjectSettings:    settings.State.ProjectSettings,
+		RootURI:            request.RootURI,
+		WorkingDirectory:   request.WorkingDirectory,
+		ManagedTools:       runtimes.Tools,
+		ProjectCodeAllowed: request.ProjectCodeAllowed,
 	}
 	temporary := ""
+	var launch *launchConfiguration
 	if declaresBackendLaunch(manifest, languageID) {
 		resolved, resolveErr := s.resolveBackendLaunch(ctx, entry.Installed.ID, entry.Installed.Version, manifest, languageID, workspaceContext, start, runtimes)
 		if resolveErr != nil {
@@ -140,6 +149,7 @@ func (s *Service) StartLanguageServer(ctx context.Context, entries []pluginmanag
 		start.Plan = resolved.plan
 		start.WorkspaceStateDirectory = resolved.directories.workspaceState
 		temporary = resolved.directories.temporary
+		launch = resolved.configuration
 	}
 	if _, contextErr := s.workspaceForBackend(ctx, request); contextErr != nil {
 		removeTemporary(temporary)
@@ -175,6 +185,7 @@ func (s *Service) StartLanguageServer(ctx context.Context, entries []pluginmanag
 		ContextID:         workspaceContext.ContextID,
 		ContextGeneration: workspaceContext.Generation,
 		temporary:         temporary,
+		launch:            launch,
 	}
 	s.registerLanguageSession(session)
 	return session, nil

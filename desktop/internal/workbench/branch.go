@@ -37,6 +37,12 @@ const (
 	branchDialogConflict
 	// branchDialogDelete confirms deleting local and remote branches (branch_delete.go).
 	branchDialogDelete
+	// branchDialogDeleteUnmerged offers review after Core refused ordinary deletion.
+	branchDialogDeleteUnmerged
+	// branchDialogForceDelete requires a second explicit destructive confirmation.
+	branchDialogForceDelete
+	// branchDialogDeleteResult keeps every batch outcome visible until dismissed.
+	branchDialogDeleteResult
 	// branchDialogTag asks for the name, target and message of a new tag.
 	branchDialogTag
 	// branchDialogTagDelete confirms deleting a tag.
@@ -96,6 +102,13 @@ type branchSession struct {
 	// them; deleteSkipped counts the marked references it leaves out (branch_delete.go).
 	deleting      []core.GitReference
 	deleteSkipped int
+	// deleteReport belongs to the operation. Its notification can reopen it after this
+	// dialog has been dismissed or replaced.
+	deleteReport     *branchDeleteReport
+	deleteFromNotice bool
+	deleteError      string
+	deleteList       ui.ListState
+	deleteResultList ui.ListState
 
 	// common are the branches every repository of a project folder with several has
 	// (branch_common.go).
@@ -119,6 +132,7 @@ func (a *App) openBranches() {
 	if p == nil || !p.hasRepository() {
 		return
 	}
+	a.closeRemoteHostMenu()
 	a.title.projectOpen = false
 	a.title.gearOpen = false
 	a.title.runConfigOpen = false
@@ -358,6 +372,10 @@ func (a *App) beginRevision() {
 
 // cancelBranchDialog closes the open dialog without doing what it asked.
 func (a *App) cancelBranchDialog() {
+	if a.branch.dialog == branchDialogDelete || a.branch.dialog == branchDialogDeleteUnmerged || a.branch.dialog == branchDialogForceDelete || a.branch.dialog == branchDialogDeleteResult {
+		a.branch.deleteReport = nil
+		a.branch.deleteError = ""
+	}
 	a.branch.dialog, a.branch.across = branchDialogNone, false
 }
 

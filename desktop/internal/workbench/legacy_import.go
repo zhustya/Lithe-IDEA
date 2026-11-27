@@ -242,7 +242,7 @@ func (a *App) legacyImportView(c ui.C) {
 	chosen := slices.ContainsFunc(s.items, func(item legacyImportItem) bool { return item.chosen })
 	confirmed, cancelled := false, false
 	spec := ui.ModalSpec{Description: i18n.SharedFormat(language, "desktop.legacyImport.description", map[string]string{"source": s.found.Source}), Width: 480}
-	closed := ui.ModalWith(c, &s.open, i18n.Shared(language, "desktop.legacyImport.title"), spec, func() {
+	closed := ui.Modal(c, &s.open, i18n.Shared(language, "desktop.legacyImport.title"), spec, func() {
 		ui.Column(c.Part("legacy-import")).FillWidth().Gap(6).Children(func() {
 			for index := range s.items {
 				entry := &s.items[index]
@@ -251,7 +251,7 @@ func (a *App) legacyImportView(c ui.C) {
 				ui.Row(k).FillWidth().Items(ui.Center).Gap(8).Children(func() {
 					ui.Switch(k.Part("chosen"), &entry.chosen, label).Grow(1).Shrink(1).MinWidth(0)
 					if value != "" {
-						ui.Text(k, value).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Ellipsis().Shrink(1).MinWidth(0)
+						ui.Text(c, value).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Ellipsis().Shrink(1).MinWidth(0)
 					}
 				})
 			}

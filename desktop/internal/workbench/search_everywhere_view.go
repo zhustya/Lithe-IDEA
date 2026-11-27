@@ -11,6 +11,7 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/icons"
 	"github.com/vivaui/viva/app"
+	"github.com/vivaui/viva/components"
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 )
@@ -33,6 +34,9 @@ func (a *App) everywherePopup(c ui.C) {
 	}
 	s := &p.everywhere
 	scope := v.effectiveScope()
+	if p.everywhereActionsOnly() {
+		scope = everywhereScopeActions
+	}
 	a.updateEverywhere(p, v.query.Text(), scope)
 	if v.focus {
 		c.Canvas().RequestFocus(everywhereQueryID)
@@ -52,13 +56,17 @@ func (a *App) everywherePopup(c ui.C) {
 	ui.Stack(c).Fill().Children(func() {
 		anchor = ui.Row(c).Absolute().Left((bounds.Width - width) / 2).Top(84).Width(width).Height(1)
 	})
-	closed := ui.PopoverWith(c, anchor, ui.PopoverSpec{
+	closed := ui.Popover(c, anchor, &v.open, ui.PopoverSpec{
 		Width: width, Offset: 1, Align: ui.Start, KeepOpenOnAnchor: true,
-	}, &v.open, func() {
+	}, func() {
 		ui.Column(c).FillWidth().Height(height).Gap(8).Children(func() {
-			a.everywhereScopes(c, p, language)
-			field := ui.TextFieldID(c, everywhereQueryID, &v.query, i18n.Shared(language, "desktop.everywhere.title"),
-				i18n.Shared(language, "native.typeToSeeCommands")).
+			if p.everywhereActionsOnly() {
+				ui.Text(c, i18n.Shared(language, "desktop.everywhere.actions")).Bold()
+			} else {
+				a.everywhereScopes(c, p, language)
+			}
+			field := ui.TextField(c, &v.query, i18n.Shared(language, "desktop.everywhere.title"),
+				i18n.Shared(language, "native.typeToSeeCommands"), ui.WithID(everywhereQueryID)).
 				Icon(icons.Search).Action(icons.X, i18n.Shared(language, "native.clearSearch"))
 			if field.ActionClicked() {
 				a.performed("workspace.search.clear", surfaceButton)
@@ -113,21 +121,20 @@ func (a *App) everywhereScopes(c ui.C, p *project, language i18n.Language) {
 	}
 	ui.Row(c).FillWidth().Gap(4).Items(ui.Center).Children(func() {
 		for index, label := range labels {
-			tab := ui.Button(c.KeyInt(index), label).Ghost()
-			if index == v.scope {
-				tab.Secondary()
+			var clicked bool
+			if key, help := everywhereScopeHelp(language, index); help != "" {
+				clicked = a.everywhereHelpTab(c.KeyInt(index), key, language, label, help, index == v.scope)
+			} else {
+				tab := ui.Button(c.KeyInt(index), label).Ghost()
+				if index == v.scope {
+					tab.Secondary()
+				}
+				clicked = tab.Clicked()
 			}
-			if tab.Clicked() {
+			if clicked {
 				a.performed("workspace.searchEverywhere.scope", surfaceButton)
 				v.scope = index
 				a.focusEverywhere(p)
-			}
-			if key, help := everywhereScopeHelp(language, index); help != "" {
-				info := ui.Button(c.Key(key), i18n.Shared(language, "native.moreInformation")).Icon(icons.Info).IconOnly().Ghost().Size(18, 18).
-					Tooltip(help)
-				if info.Clicked() {
-					a.focusEverywhere(p)
-				}
 			}
 		}
 		ui.Spacer(c).Grow(1)
@@ -150,7 +157,49 @@ func (a *App) everywhereScopes(c ui.C, p *project, language i18n.Language) {
 	})
 }
 
-// everywhereScopeHelp is the key and text of the ⓘ after a tab: what the tab lists and
+// A tab with an ⓘ starts with a button's own padding before its name, keeps the ⓘ close
+// after the name, and leaves only a little room after the ⓘ, whose icon is already inset.
+const (
+	everywhereHelpTabStartPad = 10
+	everywhereHelpTabGap      = 2
+	everywhereHelpTabEndPad   = 4
+	everywhereHelpInfoSize    = 18
+)
+
+// everywhereHelpTab declares a tab whose ⓘ explains it, and reports a click on the tab or
+// its ⓘ. The ⓘ belongs to the tab, so both sit in one block: the chosen fill, the hover
+// and the click cover the name and the ⓘ together. The block takes the colors, radius and
+// height the theme gives the other tabs' buttons (Ghost, Secondary when chosen), so it
+// reads as one of them; the ⓘ stays a button of its own, so the pointer and the keyboard
+// both reach its tooltip.
+func (a *App) everywhereHelpTab(c ui.C, infoKey string, language i18n.Language, label, help string, chosen bool) bool {
+	variant := components.ButtonGhost
+	if chosen {
+		variant = components.ButtonSecondary
+	}
+	rest := components.ButtonRecipe(a.theme, variant, gfx.State{})
+	hovered := components.ButtonRecipe(a.theme, variant, gfx.State{Hovered: true})
+	pressed := components.ButtonRecipe(a.theme, variant, gfx.State{Pressed: true})
+	focused := components.ButtonRecipe(a.theme, variant, gfx.State{FocusVisible: true})
+	metrics := a.theme.Metrics
+	tab := ui.ButtonBase(c, label).Height(metrics.ControlHeight).Shrink(0).
+		PadSides(0, everywhereHelpTabEndPad, 0, everywhereHelpTabStartPad).Gap(everywhereHelpTabGap).
+		Radius(rest.Radius).Items(ui.Center).
+		Hover(ui.Look{}.Background(hovered.Background)).Pressed(ui.Look{}.Background(pressed.Background)).
+		Focus(ui.Look{}.Ring(focused.RingWidth, focused.Ring))
+	if rest.Filled {
+		tab.Background(rest.Background)
+	}
+	var info ui.Box
+	tab.Children(func() {
+		ui.Text(c, label).FontSize(metrics.FontSizeM).Weight(gfx.WeightMedium).Color(rest.Foreground)
+		info = ui.Button(c.Key(infoKey), i18n.Shared(language, "native.moreInformation")).Icon(icons.Info).IconOnly().Ghost().
+			Size(everywhereHelpInfoSize, everywhereHelpInfoSize).Tooltip(help)
+	})
+	return info.Clicked() || tab.Clicked()
+}
+
+// everywhereScopeHelp is the key and text of the ⓘ in a tab: what the tab lists and
 // how far it reaches. Only the tabs that list what language servers report have one,
 // since what they leave out (the standard library, dependencies) is not obvious.
 func everywhereScopeHelp(language i18n.Language, scope int) (string, string) {
@@ -185,7 +234,7 @@ func (a *App) everywhereFilter(c ui.C, p *project, language i18n.Language) {
 	if button.Clicked() {
 		v.filterOpen = !v.filterOpen
 	}
-	ui.PopoverWith(c, button, ui.PopoverSpec{Align: ui.End, Width: 300}, &v.filterOpen, func() {
+	ui.Popover(c, button, &v.filterOpen, ui.PopoverSpec{Align: ui.End, Width: 300}, func() {
 		option := func(label, action string, value *bool) {
 			before := *value
 			ui.Checkbox(c, value, label)
@@ -451,7 +500,8 @@ func (a *App) searchResultMenu(c ui.C, target ui.Box, p *project, result core.Wo
 				a.openSearchResult(p, result)
 			})
 		}
-		if menu.Item(revealLabel(language)).Clicked() {
+		// The placeholder path of a remote workspace's file is nothing the file manager can show.
+		if p.remote == nil && menu.Item(revealLabel(language)).Clicked() {
 			c.After(func() {
 				a.performed(surface+".reveal", surfaceContextMenu)
 				a.revealPath(full)
@@ -509,7 +559,7 @@ func (a *App) everywhereKey(p *project, event gfx.KeyEvent) gfx.EventResult {
 		}
 	}
 	v := &a.everywhereView
-	if event.Key == gfx.KeyTab && (event.Modifiers == 0 || event.Modifiers == gfx.ModifierShift) {
+	if !p.everywhereActionsOnly() && event.Key == gfx.KeyTab && (event.Modifiers == 0 || event.Modifiers == gfx.ModifierShift) {
 		step := 1
 		if event.Modifiers == gfx.ModifierShift {
 			step = -1
@@ -521,7 +571,7 @@ func (a *App) everywhereKey(p *project, event gfx.KeyEvent) gfx.EventResult {
 	if event.Modifiers != 0 {
 		return gfx.EventResult{}
 	}
-	if v.effectiveScope() == everywhereScopeActions {
+	if p.everywhereActionsOnly() || v.effectiveScope() == everywhereScopeActions {
 		switch event.Key {
 		case gfx.KeyUp:
 			v.actionSelected = max(0, v.actionSelected-1)

@@ -87,11 +87,14 @@ func (a *App) commands() []command {
 	add("language.zh", t.GroupView, t.LanguageChinese, "", a.settings.Language != "zh-Hans", func() { a.setLanguage("zh-Hans") })
 	add("editor.vimMode", t.GroupEditor, t.ToggleVim, "", true, func() { a.setVimMode(!a.settings.VimMode) })
 
+	if a.documentOnly {
+		add("document.open", t.GroupEditor, i18n.Shared(a.language(), "desktop.singleFile.openFile"), "", true, a.chooseStandaloneFile)
+	}
 	addFrom("project.open", t.GroupProject, t.OpenProject, true, a.chooseProject)
 	addFrom("project.new", t.GroupProject, t.NewProject, true, a.openNewProject)
 	addFrom("project.clone", t.GroupProject, t.Clone, true, a.openClone)
 	if p == nil {
-		return sortCommands(list)
+		return a.sessionCommands(sortCommands(list))
 	}
 	add("editor.newScratch", t.GroupEditor, a.text.Commands.NewScratch, "", true, func() { a.newScratch(p) })
 	add("editor.scratchFiles", t.GroupEditor, a.text.Commands.ScratchFiles, "", true, a.openScratchList)
@@ -120,7 +123,7 @@ func (a *App) commands() []command {
 			command := text
 			add("terminal.runSelection", t.GroupTerminal, i18n.Shared(a.language(), "desktop.terminal.runSelection"), "", true, func() {
 				if term := a.newTerminal(p, ""); term != nil {
-					a.openTerminals(p)
+					a.openToolWindow(itemTerminal)
 					a.sendTerminalCommand(term, command)
 				}
 			})
@@ -161,12 +164,16 @@ func (a *App) commands() []command {
 
 	// Every tool window, plugin ones included, can be shown by name.
 	for index, it := range a.chrome.catalog {
-		if !it.panel {
+		if !it.panel || !a.chrome.present(index) {
 			continue
 		}
 		id := it.id
 		open := a.chrome.isOpen(index)
 		add(toolCommandPrefix+id, t.GroupToolWindows, t.ShowTool(it.label(a.text)), "", !open, func() {
+			if a.documentOnly && id == itemTerminal {
+				a.toggleStandaloneTerminal()
+				return
+			}
 			a.reduceChrome(core.SetChromeOpen(id, true))
 		})
 	}
@@ -174,6 +181,11 @@ func (a *App) commands() []command {
 	// A plugin command opens one of its plugin's tool windows; only commands offered in the palette.
 	for _, command := range a.pluginCommands {
 		if !pluginCommandOffered(command) {
+			continue
+		}
+		if command.ToolWindowID == "" {
+			command := command
+			add(pluginCommandID(command), t.GroupToolWindows, command.Title, "", true, func() { a.runPluginCommand(p, command.PluginID, command.ID) })
 			continue
 		}
 		windowID := pluginItemPrefix + command.ToolWindowID
@@ -198,6 +210,9 @@ func (a *App) commands() []command {
 	addFrom("git.commitPush", t.GroupGit, t.CommitAndPush, true, func(surface actionSurface) { a.startCommit(p, true, surface) })
 	add("git.branches", t.GroupGit, t.Branches, "", true, a.openBranches)
 	add("git.pull", t.GroupGit, a.text.Sync.Pull.MenuItem, "", p.hasRepository(), func() { a.openPullDialog(p) })
+	addFrom("git.push", t.GroupGit, t.Push, p.hasRepository(), func(surface actionSurface) { a.openPush(p, surface) })
+	addFrom("git.fetch", t.GroupGit, t.Fetch, p.hasRepository(), func(surface actionSurface) { a.fetchAll(p, surface) })
+	addFrom("git.updateBranch", t.GroupGit, t.UpdateBranch, p.hasRepository() && (p.log.current != "" || p.git.branch() != ""), func(surface actionSurface) { a.updateCurrentBranch(p, surface) })
 	if d := p.selectedDocument(p.docs.group); d != nil && !d.virtual {
 		addFrom("git.lineHistory", t.GroupGit, i18n.Shared(a.language(), "desktop.editorMenu.lineHistory"), p.git.isRepository(), func(surface actionSurface) { a.startLineHistory(p, d, surface) })
 	}
@@ -208,7 +223,7 @@ func (a *App) commands() []command {
 	add("debug.toggleBreakpoint", t.GroupRun, t.ToggleBreakpoint, "", true, func() { a.toggleBreakpoint(p) })
 
 	add("terminal.new", t.GroupTerminal, t.NewTerminal, "", true, func() { a.openToolTerminal("") })
-	return sortCommands(list)
+	return a.sessionCommands(sortCommands(list))
 }
 
 // sortCommands orders the catalog by group, then title, so the list reads the

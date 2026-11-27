@@ -40,6 +40,8 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginpkg"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/projectgen"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/remoteconn"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/remoteserver"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/settingswindow"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/wslpath"
@@ -52,6 +54,8 @@ import (
 // the calls that read the disk or run Git, so a screen can be checked against answers the
 // test chooses.
 type Kernel interface {
+	workspaceReadKernel
+	CLIOpenTarget(context.Context, string) (core.CLITarget, error)
 	ReadSourceSettings(context.Context, json.RawMessage) (core.SourceSettingsState, error)
 	PlanSourceSettingsEdits(context.Context, core.SourceSettingsSnapshot, []core.SourceSettingsEdits, bool) ([]core.SourceSettingsWrite, error)
 	DecodeSourceSettingsReceipt(context.Context, core.SourceSettingsWrite, json.RawMessage) (core.SourceSettingsReceipt, error)
@@ -97,6 +101,7 @@ type Kernel interface {
 	debugStateKernel
 	processExitKernel
 	processMemoryKernel
+	processPortsKernel
 	MatchOutputLinks(context.Context, core.OutputLinkRequest) ([]core.OutputLink, error)
 	DecodeOutputStyle(ctx context.Context, chunk []byte, policy core.OutputEncodingPolicy, state json.RawMessage) (core.OutputStyleDecoding, error)
 	ResolveOutputEncoding(ctx context.Context, policy core.OutputEncodingPolicy) (core.OutputEncodings, error)
@@ -127,6 +132,12 @@ type Kernel interface {
 	CheckBeforeLaunchTask(ctx context.Context, root string, runType core.RunTypeKey, values map[string]json.RawMessage, plugins *core.RunTypePlugins) (core.RunTaskCheck, error)
 	BeforeLaunchField(ctx context.Context, root, configurationID string, plugins *core.RunTypePlugins) (core.RunBeforeLaunchField, error)
 	RunArgumentText(ctx context.Context, lists [][]string) ([]string, error)
+	// CreateWorkspaceEntry, RenameWorkspaceEntry, CopyWorkspaceEntry and ResolveWorkspaceEntry
+	// make the file changes a plugin asks for (pluginfilechanges.go).
+	CreateWorkspaceEntry(ctx context.Context, creation core.WorkspaceEntryCreation) (core.WorkspaceEntry, error)
+	RenameWorkspaceEntry(ctx context.Context, root, path, target string) (core.WorkspaceEntry, error)
+	CopyWorkspaceEntry(ctx context.Context, root, path, target string) (core.WorkspaceEntry, error)
+	ResolveWorkspaceEntry(ctx context.Context, root, path string) (core.WorkspaceEntry, error)
 	SetDebugBreakpoints(ctx context.Context, sessionID, sourcePath string, breakpoints []core.DebugSourceBreakpoint) (core.DebugUpdate, error)
 	ExecuteDebug(ctx context.Context, sessionID, operationID, command string, threadID *int64, granularity string) (core.DebugUpdate, error)
 	ExecuteDebugThread(ctx context.Context, sessionID, operationID, command string, threadID int64) (core.DebugUpdate, error)
@@ -155,10 +166,11 @@ type Kernel interface {
 	ToolchainSettingsViewOf(ctx context.Context, request core.ToolchainSettingsViewRequest) (core.ToolchainSettingsView, error)
 	// CommandInstallerRequirements, PlanCommandInstaller and CommandInstallerDefaultDirectory
 	// read a plugin's commandInstallers[]: which systemCommand launches name which commands,
-	// one installer expanded for the target the user chose, and the directory a toolDefault
-	// installation lands in from its probes' output (command_installers.go).
-	CommandInstallerRequirements(ctx context.Context, manifest json.RawMessage) (core.CommandRequirements, error)
-	PlanCommandInstaller(ctx context.Context, manifest json.RawMessage, installerID, target, installDirectory string) (core.CommandInstallPlan, error)
+	// one installer expanded for the target the user chose, with a download's archive selected
+	// for platform, and the directory a toolDefault installation lands in from its probes'
+	// output (command_installers.go).
+	CommandInstallerRequirements(ctx context.Context, manifest json.RawMessage, platform *core.CommandArchivePlatform) (core.CommandRequirements, error)
+	PlanCommandInstaller(ctx context.Context, manifest json.RawMessage, installerID, target, installDirectory string, platform *core.CommandArchivePlatform) (core.CommandInstallPlan, error)
 	CommandInstallerDefaultDirectory(ctx context.Context, manifest json.RawMessage, installerID string, outputs []*string) (string, bool, error)
 	ToolchainDiscoveryPlanOf(ctx context.Context, registry json.RawMessage, platform string) (core.ToolchainDiscoveryPlan, error)
 	ToolchainCandidatesOf(ctx context.Context, request core.ToolchainCandidatesRequest) (core.ToolchainCandidates, error)
@@ -166,6 +178,7 @@ type Kernel interface {
 	ResolveToolchainPins(ctx context.Context, document json.RawMessage, directory, tool string) (core.ToolchainPinResolution, error)
 	EditToolchainPins(ctx context.Context, document json.RawMessage, directory string, edits []core.ToolchainPinEdit) (json.RawMessage, error)
 	ToolchainPinStorage(ctx context.Context) (core.ToolchainPinStoragePlan, error)
+	ReadToolchainCatalogForWorkspace(ctx context.Context, document *string, platform, workspace string) (core.ToolchainCatalogState, error)
 	DecodeToolchainPinDocument(ctx context.Context, document *string) (json.RawMessage, error)
 	EditToolchainPinSources(ctx context.Context, request core.ToolchainPinSourcesRequest) (core.ToolchainPinSourcesEdit, error)
 	CloseGitHistoryCursor(ctx context.Context, root, cursor string) (bool, error)
@@ -201,7 +214,65 @@ type Kernel interface {
 	GitFetchSettingsOf(ctx context.Context, root string) (core.GitFetchSettings, error)
 	GitPull(ctx context.Context, root string, strategy core.GitPullStrategy) error
 	GitDeleteBranch(ctx context.Context, root string, branch core.GitReference) (core.GitBranchDeletion, error)
+	GitForceDeleteBranch(ctx context.Context, root string, branch core.GitReference, expectedTarget string) (core.GitBranchDeletion, error)
 	GitDeleteRemoteBranch(ctx context.Context, root string, reference core.GitReference) error
+	GitAuthRespond(ctx context.Context, requestID string, answer *string) (bool, error)
+	RemoteConnections(ctx context.Context, document *string) (core.RemoteConnectionsState, error)
+	EditRemoteConnections(ctx context.Context, document *string, edit core.RemoteConnectionEdit) (core.RemoteConnectionsPublication, error)
+	RemoteProbe(ctx context.Context, connection core.SSHConnection, preferences *string) (core.RemoteProbeResult, error)
+	RemoteListWSLDistributions(ctx context.Context) (core.RemoteWSLDistributions, error)
+	RemoteListContainers(ctx context.Context, engine, sessionID string) (core.RemoteContainers, error)
+	RemoteContainerRuntimes(ctx context.Context) (core.ContainerRuntimes, error)
+	RemoteDevcontainerPrepare(ctx context.Context, form core.DevcontainerForm) (core.PreparedDevcontainer, error)
+	RemoteDevcontainerRuntimeConfigs(ctx context.Context, folder string, runtime *core.ContainerRuntimeTarget) (core.DevcontainerFolder, error)
+	RemoteRuntimeContainers(ctx context.Context, runtime core.ContainerRuntimeTarget) (core.RemoteContainers, error)
+	RemoteDevcontainerConfigs(ctx context.Context, folder string) ([]core.DevcontainerConfig, error)
+	RemoteDevcontainerUp(ctx context.Context, request core.DevcontainerUpRequest, output func(core.DevcontainerOutput)) (core.DevcontainerUp, error)
+	RemoteAuthRespond(ctx context.Context, requestID string, answer *string) (bool, error)
+	RemoteConnect(ctx context.Context, request core.RemoteConnectRequest) (core.RemoteConnectResult, error)
+	RemoteDisconnect(ctx context.Context, sessionID string, programs core.RemoteClosePrograms) (core.RemoteDisconnectResult, error)
+	RemoteRunningPrograms(ctx context.Context, sessionID string) ([]core.RemoteProgram, error)
+	RemoteEndPrograms(ctx context.Context, sessionID string, programs []core.RemoteProgram) (int, error)
+	RemoteCloseAll(ctx context.Context) (int, error)
+	RemoteReadDir(ctx context.Context, sessionID, path string) (core.RemoteDirectory, error)
+	RemoteStat(ctx context.Context, sessionID, path string) (core.RemoteFileMetadata, error)
+	RemoteReadFile(ctx context.Context, sessionID, path string) ([]byte, core.RemoteFileVersion, error)
+	RemoteWriteFile(ctx context.Context, sessionID, path string, data []byte, expected *core.RemoteFileVersion, root ...string) (core.RemoteFileVersion, bool, error)
+	RemoteCreateDirectory(ctx context.Context, sessionID, path string) error
+	RemoteMakeDirectory(ctx context.Context, sessionID, path string) error
+	RemoteRename(ctx context.Context, sessionID, from, to string, overwrite bool) error
+	RemoteCopy(ctx context.Context, sessionID, from, to string, recursive, overwrite bool) error
+	RemoteTrash(ctx context.Context, sessionID, path string) error
+	RemoteServerState(ctx context.Context, sessionID string) error
+	SearchRemoteConnections(ctx context.Context, document *string, query string) (core.RemoteConnectionsState, error)
+	RemoteParseAddress(ctx context.Context, text string) (core.RemoteAddress, error)
+	RemoteEffectiveSettings(ctx context.Context, connection core.SSHConnection, preferences *string) (core.RemoteEffectiveSettings, error)
+	RemoteSSHConfigHosts(ctx context.Context, homeDirectory string, document, preferences *string) (core.RemoteSSHConfigHosts, error)
+	RemoteMottyHosts(ctx context.Context, configDirectory string, document *string) (core.RemoteMottyHosts, error)
+	RemotePreferences(ctx context.Context, document *string, homeDirectory string) (core.RemotePreferences, error)
+	EditRemotePreferences(ctx context.Context, document *string, edit core.RemotePreferenceEdit) (bool, *string, error)
+	RemoteWorkspaceTrust(ctx context.Context, document *string, sessionID, workspace string) (core.RemoteWorkspaceTrustState, error)
+	EditRemoteWorkspaceTrust(ctx context.Context, document *string, decision core.RemoteWorkspaceTrustDecision) (core.RemoteWorkspaceTrustPublication, error)
+	RevokeRemoteWorkspaceTrust(ctx context.Context, document *string, revoke core.RemoteWorkspaceTrustRevoke) (core.RemoteWorkspaceTrustPublication, error)
+	RemoteRunTerminal(ctx context.Context, sessionID string, open core.RemoteTerminalOpen, events core.RemoteTerminalEvents) (core.RemoteTerminalExit, error)
+	RemoteRunWatch(ctx context.Context, sessionID, root string, excludeNames []string, events core.RemoteWatchEvents) error
+	RemoteTerminalWrite(ctx context.Context, sessionID string, terminalID uint64, data []byte) (bool, error)
+	RemoteTerminalResize(ctx context.Context, sessionID string, terminalID uint64, columns, rows uint16) error
+	RemoteRunProcess(ctx context.Context, sessionID string, open core.RemoteProcessOpen, events core.RemoteProcessEvents) (core.RemoteProcessExit, error)
+	RemoteAttachProcess(ctx context.Context, sessionID string, processID uint64, events core.RemoteProcessEvents) (core.RemoteProcessExit, error)
+	RemoteProcessKill(ctx context.Context, sessionID string, processID uint64, force bool) error
+	RemoteTempDirectory(ctx context.Context, sessionID, prefix string) (string, error)
+	RemoteRemove(ctx context.Context, sessionID, path string, recursive bool) error
+	RemoteStartForward(ctx context.Context, sessionID string, target core.RemoteForwardTarget) (core.RemoteForward, bool, error)
+	RemoteStartHostForward(ctx context.Context, sessionID string, rule core.RemoteHostForwardRule) (core.RemoteForward, bool, error)
+	RemoteStartReverseForward(ctx context.Context, sessionID string, rule core.RemoteReverseForwardRule, preferences *string) (core.RemoteForward, bool, error)
+	RemoteStopForward(ctx context.Context, sessionID string, id uint64) (bool, error)
+	RemoteForwards(ctx context.Context, sessionID string) ([]core.RemoteForward, error)
+	RemoteListeningPorts(ctx context.Context, sessionID string) ([]core.RemoteListeningPort, error)
+	RemoteParseForwardAddress(ctx context.Context, text string) (core.RemoteForwardAddress, error)
+	RemotePortRecords(ctx context.Context, document *string, sessionID, workspace string) (core.RemotePortRecordsState, error)
+	EditRemotePortRecords(ctx context.Context, document *string, sessionID, workspace string, edit core.RemotePortRecordEdit) (changed bool, updated *string, records core.RemotePortRecords, err error)
+	RestoreRemoteForwards(ctx context.Context, document *string, sessionID, workspace string) ([]core.RemoteRestoredForward, error)
 	GitCreateTag(ctx context.Context, root, name, revision, message string) error
 	GitRebasePreview(ctx context.Context, root, base string) (core.RebasePreview, error)
 	GitRebaseStart(ctx context.Context, root string, preview core.RebasePreview, steps []core.RebaseStep) (*core.RebaseSession, error)
@@ -225,6 +296,7 @@ type Kernel interface {
 	ReduceDocument(ctx context.Context, state core.DocumentState, event core.DocumentEvent) (core.DocumentDecision, error)
 	SearchWorkspace(ctx context.Context, request core.WorkspaceSearchRequest) ([]core.WorkspaceSearchMatch, error)
 	SearchWorkspacePage(ctx context.Context, request core.WorkspaceSearchRequest) (core.WorkspaceSearchPage, error)
+	CountWorkspaceSearch(ctx context.Context, request core.WorkspaceSearchRequest) (core.WorkspaceSearchCounts, error)
 	InvalidateWorkspaceSearch(ctx context.Context, root string) error
 	WarmWorkspaceSearch(ctx context.Context, root string, maxFileBytes uint64, includeIgnored bool) (core.SearchIndexStatus, error)
 	FilterWorkspaceChanges(ctx context.Context, paths []string) ([]string, error)
@@ -241,7 +313,9 @@ type Kernel interface {
 	QueryReferences(ctx context.Context, request core.ReferencesQuery) (core.ReferencesResult, error)
 	ReferenceLines(ctx context.Context, request core.ReferenceLinesRequest) ([]core.ReferenceLine, error)
 	ResolveMarketplaceSource(context.Context, string) (core.MarketplaceSource, error)
+	PinMarketplaceSource(ctx context.Context, url, commit string) (core.MarketplaceSource, error)
 	ValidateMarketplaceIndex(context.Context, json.RawMessage, core.MarketplaceSourceKind, string, map[string][]int) (core.MarketplaceIndex, error)
+	RecommendMarketplacePlugins(ctx context.Context, platform string, workspaceFiles []string, catalogs []core.MarketplaceRecommendationCatalog, hostCapabilities map[string][]int, installedPluginIDs []string, dismissedPluginIDs []string) (core.MarketplaceRecommendationResult, error)
 }
 
 // Options configure a window.
@@ -252,6 +326,8 @@ type Options struct {
 	// OpenPath is a project folder the window opens when it starts; a window launched to show a
 	// worktree in a new window gets it from the command line.
 	OpenPath string
+	// OpenFile creates an isolated document session, before any plugin service exists.
+	OpenFile string
 	// Languages are the system's preferred languages, most preferred first; nil asks
 	// the system.
 	Languages []string
@@ -282,6 +358,11 @@ type Options struct {
 	// instrumented test binary raise it so scheduler load cannot masquerade as
 	// a provider failure.
 	PluginInitializeTimeout time.Duration
+	// DisablePluginRecommendations suppresses background workspace plugin detection when
+	// opening a project (used by default in test harnesses unless a fetcher is supplied).
+	DisablePluginRecommendations bool
+	// PluginRecommendationFetcher overrides marketplace recommendation catalog fetches in tests.
+	PluginRecommendationFetcher func(ctx context.Context, sources []PluginRecommendationSource) ([]core.MarketplaceRecommendationCatalog, error)
 	// first is the window's first workbench when this one is another project tab of its
 	// window; nil for the first (window_sessions.go).
 	first *App
@@ -329,10 +410,22 @@ type settings struct {
 	Language         string      `json:"language,omitempty"`
 	Theme            themeChoice `json:"theme,omitempty"`
 	MarketplaceWidth float32     `json:"marketplaceWidth,omitempty"`
+	// WindowWidth, WindowHeight and WindowMaximized are the size and maximized state the user
+	// last gave the workbench window, which the next one opens at; zero width or height opens
+	// at the default size.
+	WindowWidth     int  `json:"windowWidth,omitempty"`
+	WindowHeight    int  `json:"windowHeight,omitempty"`
+	WindowMaximized bool `json:"windowMaximized,omitempty"`
+	// SettingsWindowWidth and SettingsWindowHeight are the size the user last gave the settings
+	// window, which the next one opens at; zero opens it at its default size.
+	SettingsWindowWidth  int `json:"settingsWindowWidth,omitempty"`
+	SettingsWindowHeight int `json:"settingsWindowHeight,omitempty"`
 	// MarketplaceSources are the custom plugin index URLs the user added, in the order they were added.
 	MarketplaceSources []string `json:"marketplaceSources,omitempty"`
 	// AutoUpdatePlugins lets approved marketplace plugins update with unchanged grants.
 	AutoUpdatePlugins bool `json:"autoUpdatePlugins,omitempty"`
+	// DismissedPluginRecommendations lists plugin IDs the user dismissed from workspace prompts.
+	DismissedPluginRecommendations []string `json:"dismissedPluginRecommendations,omitempty"`
 	// HideMinimap hides the minimap of every editor; the editors show it by default.
 	HideMinimap bool `json:"hideMinimap,omitempty"`
 	// HideGitGutter hides the Git change markers of the editor gutter; they show by default.
@@ -358,8 +451,12 @@ type settings struct {
 	GitConsole core.GitConsolePreferences `json:"gitConsole,omitzero"`
 	// DisableSemanticHighlight keeps the syntax colors alone; semantic coloring is on by default.
 	DisableSemanticHighlight bool `json:"disableSemanticHighlight,omitempty"`
+	// DisableAutoCompletion suppresses completions while typing. They are on by default.
+	DisableAutoCompletion bool `json:"disableAutoCompletion,omitempty"`
 	// VimMode turns on the Vim keys of every editor; off by default (vim_mode.go).
 	VimMode bool `json:"vimMode,omitempty"`
+	// RunPerformanceCollapsed keeps the CPU/memory graph hidden while showing its summary.
+	RunPerformanceCollapsed bool `json:"runPerformanceCollapsed,omitempty"`
 	// DisableAutoSave stops saving changed files a moment after typing stops
 	// (document_autosave.go); auto-save is on by default.
 	DisableAutoSave bool `json:"disableAutoSave,omitempty"`
@@ -448,6 +545,8 @@ const (
 // keeps the pointer it started for and its result is dropped once a.project is a
 // different one (see App.background).
 type project struct {
+	// standalone owns documents and opt-in terminals; root is a location, never a workspace.
+	standalone bool
 	// root is the absolute, cleaned path of the project folder.
 	root string
 	// pluginContext belongs to this open project, not to any background consumer.
@@ -459,6 +558,9 @@ type project struct {
 	indexing projectIndexing
 	// name is the folder's name, shown in the title bar.
 	name string
+	// remote is set when the project's folder is on an SSH host (remote_workspace.go); root is
+	// then the workspace's local placeholder, which the local file system cannot open.
+	remote *remoteProject
 	// ctx ends when the project closes, which stops its kernel calls.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -490,6 +592,7 @@ type project struct {
 	tree fileTree
 	// pluginViews are the plugin views the project's tool windows show, by window (plugin_view.go).
 	pluginViews map[string]*pluginViewState
+	workflow    pluginWorkflowUI
 	// build is the Run tool window's provider-backed instances and output.
 	build buildState
 	// buildSessions are the build provider sessions the project started. They live beside build
@@ -575,16 +678,20 @@ type App struct {
 	// savedBackground is the window background last stored (window_background.go).
 	savedBackground gfx.Color
 	focus           focusTarget
-	// debugHostedPort and debugInitializeWindow replace, in tests, asking the
-	// language server for a debug port and Core's initialize deadline. Production
-	// leaves both zero.
-	debugHostedPort       func(ctx context.Context, p *project, adapter debugAdapter) (int, error)
-	debugInitializeWindow time.Duration
-	kernel                Kernel
-	store                 *store.Store
+	// debugHostedPort, debugInitializeWindow, and debugInitializeTrigger replace,
+	// in tests, asking the language server for a debug port and Core's initialize
+	// deadline. Production leaves all three zero.
+	debugHostedPort        func(ctx context.Context, p *project, adapter debugAdapter) (int, error)
+	debugInitializeWindow  time.Duration
+	debugInitializeTrigger <-chan struct{}
+	kernel                 Kernel
+	store                  *store.Store
 	// startupPath is the project folder the window opens once it exists (Options.OpenPath).
-	startupPath string
-	now         func() time.Time
+	startupPath      string
+	startupFile      string
+	documentOnly     bool
+	documentCommands map[string]bool
+	now              func() time.Time
 	// invalidator asks the window for a repaint. Every workbench of the window shares the one
 	// the window was opened with (window_sessions.go).
 	invalidator windowWake
@@ -610,14 +717,21 @@ type App struct {
 	shownTitle string
 	// updates is the update check, download and install, which every tab of the window
 	// shares (updates.go).
-	updates    *updater
-	pluginAuto *pluginAutoUpdater
-	tasks      taskQueue
+	updates                *updater
+	pluginAuto             *pluginAutoUpdater
+	pluginRecommendations  *pluginRecommendationState
+	disableRecommendations bool
+	recommendationFetcher  func(ctx context.Context, sources []PluginRecommendationSource) ([]core.MarketplaceRecommendationCatalog, error)
+	tasks                  taskQueue
 	// languages are the languages the editor knows, made when the first file is opened.
 	languages *syntax.Registry
 	// initialLanguageLoad lets early opens of unknown extensionless files wait for the
 	// enabled language snapshot while the project restores known paths immediately.
 	initialLanguageLoad atomic.Pointer[languageLoad]
+	// pluginReloadGeneration numbers reloadPluginLanguages calls so stale completions are
+	// dropped; pluginReloadMu serializes early language publication and visibility writes.
+	pluginReloadGeneration atomic.Uint64
+	pluginReloadMu         sync.Mutex
 
 	settings settings
 	// fonts is the font of each scope the settings name, worked out by applyFonts.
@@ -664,12 +778,11 @@ type App struct {
 	// buildOptionTexts keeps the build option translation files read per plugin package and language.
 	buildOptionTexts buildOptionTextCache
 	// pluginDownloads holds native temporary file leases for the open settings window.
-	pluginDownloads *marketplace.ArchiveSession
+	pluginDownloads     *marketplace.ArchiveSession
+	pluginArchiveCache  marketplace.ArchiveCache
+	pluginStartupCancel context.CancelFunc
 	// prompts are the questions plugins ask the user, one sheet at a time.
 	prompts pluginPrompts
-	// web opens the pages of plugin web tool windows; webReady is set once it can.
-	web      app.WebHost
-	webReady bool
 	// pluginPages are the open pages of web tool windows by chrome identifier.
 	pluginPages map[string]*pluginPage
 	// previews are the web pages of the editor area: Markdown pages and file viewers.
@@ -690,6 +803,10 @@ type App struct {
 	// Discovery remains registered until its report is cleaned up, even after
 	// this workbench closes its project or leaves the tab strip.
 	pluginDiscoveryLaunches pluginLaunches
+	// Provider launches can still be cleaning up after their project closes.
+	buildProviderLaunches pluginLaunches
+	// Providers remain owned here until native disposal succeeds.
+	closingBuildProviders closingBuildProviders
 	// pluginServerMu guards the language-server maps because a build provider
 	// may attach to a shared session from a background model load.
 	pluginServerMu sync.Mutex
@@ -736,8 +853,21 @@ type App struct {
 	// semantics: back/forward history, the outline, references and so on (editor_features.go).
 	editor editorFeatures
 
-	welcome    welcomeState
-	clone      cloneState
+	welcome welcomeState
+	clone   cloneState
+	// remote is the Remote Development window (remote.go).
+	remote remoteState
+	// remoteBundle, remoteAnchor and remoteAfter replace the server builds a connection sends,
+	// the anchor of the remote workspaces' placeholders and the timers of their heartbeats and
+	// reconnections (remote_workspace.go); tests set them.
+	remoteBundle func() (remoteserver.Bundle, error)
+	remoteAnchor func() (string, error)
+	remoteAfter  func(time.Duration, func()) func() bool
+	// remoteSecretStore replaces the platform secret store the kept host sessions are remembered
+	// in (remote_close.go); tests set it.
+	remoteSecretStore remoteconn.Secrets
+	// gitAuth holds the questions of the Git operations the user started (git_auth.go).
+	gitAuth    gitAuthState
 	newProject newProjectState
 	// generatorPlugins, projectToolLists and projectCommand replace the plugin
 	// service, the toolchain discovery and the PATH lookup the New Project window
@@ -850,6 +980,8 @@ func New(options Options) *App {
 		documentReader:       readDocument,
 		store:                options.Store,
 		startupPath:          options.OpenPath,
+		startupFile:          options.OpenFile,
+		documentOnly:         options.OpenFile != "",
 		now:                  now,
 		systemLanguage:       i18n.Detect(languages),
 		chrome:               newChromeState(),
@@ -860,6 +992,17 @@ func New(options Options) *App {
 		delays:               defaultLogDelays,
 		aiKernel:             options.AIKernel,
 		listShells:           localshell.InstalledShells,
+	}
+	if a.documentOnly {
+		a.aiKernel = nil
+		policy, err := a.kernel.CLIOpenTarget(context.Background(), "file")
+		a.documentCommands = make(map[string]bool, len(policy.Commands))
+		for _, id := range policy.Commands {
+			a.documentCommands[id] = true
+		}
+		if err != nil {
+			a.backgroundFailed("single_file_policy", err)
+		}
 	}
 	a.gitConsole = core.NewGitConsole(a.gitConsoleChanged)
 	// The settings are read before the log sink is in place; a failure is recorded below, once
@@ -906,12 +1049,16 @@ func New(options Options) *App {
 		a.logSink, a.logs = first.logSink, first.logs
 		a.updates = first.updates
 		a.pluginAuto = first.pluginAuto
+		a.pluginRecommendations = first.pluginRecommendations
 	} else {
 		a.sessions = newWindowSessions(a, options)
 		a.updates = newUpdater(a.settings)
 		a.pluginAuto = &pluginAutoUpdater{enabled: a.settings.AutoUpdatePlugins}
+		a.pluginRecommendations = newPluginRecommendationState()
 		a.invalidator = windowWake{invalidator: new(app.Invalidator)}
 	}
+	a.disableRecommendations = options.DisablePluginRecommendations
+	a.recommendationFetcher = options.PluginRecommendationFetcher
 	if options.Logs != nil && options.first == nil {
 		a.logSink = options.Logs
 		version := options.Version
@@ -943,9 +1090,13 @@ func New(options Options) *App {
 		a.backgroundFailed("update_snapshot", restoreErr)
 	}
 	a.loadSearchPreferences()
-	a.openPlugins(options)
+	if !a.documentOnly {
+		a.openPlugins(options)
+	}
 	a.settingsWindow = a.newSettingsWindow()
-	a.loadRecent()
+	if !a.documentOnly {
+		a.loadRecent()
+	}
 	a.loadChrome()
 	if options.first == nil && a.store != nil {
 		a.restoreBackground()
@@ -953,6 +1104,8 @@ func New(options Options) *App {
 			// After the background is restored: the notice saves the settings, which would
 			// otherwise save no background.
 			a.noticeUnknownSettings()
+		} else {
+			a.noticeUnreadableSettings()
 		}
 	}
 	return a
@@ -987,6 +1140,11 @@ func (a *App) openPlugins(options Options) {
 		return
 	}
 	a.plugins = service
+	cache, cacheErr := marketplace.UserArchiveCache()
+	if cacheErr != nil {
+		a.backgroundFailed("plugin_archive_cache", cacheErr)
+	}
+	a.pluginArchiveCache = cache
 	service.Backend.SetInitializeTimeout(options.PluginInitializeTimeout)
 	service.Backend.SetToolResolver(a.resolveBackendTool)
 	service.Backend.SetToolEntryResolver(a.resolveBackendToolEntry)
@@ -1000,7 +1158,16 @@ func (a *App) openPlugins(options Options) {
 		a.backgroundFailedIn(ctx, "toolchain_provider_discovery", err)
 	}
 
+	service.BuildConfigurationIssue = func(ctx context.Context, err error) {
+		a.backgroundFailedIn(ctx, "plugin_build_configuration_watch", documentLogError(err))
+	}
+	service.WorkspaceWatchIssue = func(ctx context.Context, err error) {
+		a.backgroundFailedIn(ctx, "plugin_workspace_watch", documentLogError(err))
+	}
 	service.RuntimeIssue = a.recordPluginRuntimeIssue
+	service.ContextIssue = func(ctx context.Context, err error) {
+		a.backgroundFailedIn(ctx, "plugin_workspace_context_notification", err)
+	}
 	service.SetRuntimeLanguage(a.language().Code())
 	if err := service.AttachWorkbench(pluginWorkbench{app: a}); err != nil {
 		a.operationFailed("plugin_host_services", err)
@@ -1026,47 +1193,94 @@ func (a *App) Run() error {
 			return err
 		}
 		a.window = window
+		// Viva queues Finder events during startup. Register after the window is
+		// ready so even the first delivered document has an owned session and wake.
+		application.OnOpenFile(func(path string) {
+			a.post(func(a *App) { a.openSystemDocument(path) })
+		})
 		a.startUpdates()
-		a.startPluginAutoUpdates()
-		if path := a.startupPath; path != "" {
-			a.startupPath = ""
-			a.post(func(a *App) { a.openProject(path) })
+		a.startPluginInventory()
+		if !a.documentOnly {
+			a.loadGitHubAccount()
 		}
-		// The plugin stack is assembled before the window exists, because opening a
-		// window is what installs the invalidator its background work needs.
-		a.reloadPluginLanguages()
-		a.loadGitHubAccount()
 		// Core's stop time applies to every process stopped from now on, and Core decides what an
 		// earlier run left behind; both need the window, which delivers their answers.
-		a.refreshStopGrace()
-		a.refreshConsoleEncodings()
-		a.planStartupSweep()
+		if !a.documentOnly {
+			a.refreshStopGrace()
+			a.refreshConsoleEncodings()
+			a.planStartupSweep()
+		}
 		// Development builds mark the Dock icon without changing the product name in the UI.
 		if buildinfo.Development {
 			application.SetDockBadge(a.text.App.DevBadge)
 		}
 		return nil
 	})
+	if a.pluginStartupCancel != nil {
+		a.pluginStartupCancel()
+	}
 	a.stopPluginAutoUpdates()
 	a.windowLoopEnded(err, faulted.Load())
-	for _, session := range a.sessions.everyOne() {
-		session.unsubscribeSettings()
-		session.stopWatchingDiagnostics()
-		session.closeProject()
-		session.wait()
-		if session.pluginDownloads != nil {
-			session.recordPluginInstallCleanup(context.Background(), session.pluginDownloads.Close())
+	a.shutdownSessions()
+	if a.kernel != nil {
+		// Every tab shares the kernel: this ends the remote sessions no closed project ended,
+		// such as one the Remote Development window had open, and refuses new ones.
+		ctx, cancel := context.WithTimeout(context.Background(), remoteCloseAllTimeout)
+		if _, err := a.kernel.RemoteCloseAll(ctx); err != nil {
+			a.backgroundFailed("remote_close_all", remoteLogError(err))
 		}
-		if session.plugins != nil && session.plugins.Runs != nil {
-			// Runs of the closed project are already stopped; this ends any the
-			// project close did not own and refuses new ones during shutdown.
-			session.plugins.Runs.StopAll()
-		}
+		cancel()
 	}
 	if a.logs != nil {
 		a.logs.Wait()
 	}
 	return err
+}
+
+const (
+	// Give plugin shutdown calls their own deadline before abandoning the final wait.
+	shutdownWait          = pluginServerStopTimeout + 5*time.Second
+	shutdownWaitOperation = "workbench_shutdown_wait"
+)
+
+// shutdownSessions runs after Viva returns, when no window can deliver a save or
+// confirmation callback. The normal close requests finish those steps while the
+// window is alive. Any project still present here needs resource teardown and
+// recovery checkpoints for its unsaved documents.
+func (a *App) shutdownSessions() {
+	sessions := a.sessions.everyOne()
+	for _, session := range sessions {
+		session.unsubscribeSettings()
+		session.stopWatchingDiagnostics()
+		session.closingProject = false
+		if p := session.project; p != nil {
+			session.disposeProject(p)
+		}
+		session.closePluginDownloads()
+		if session.plugins != nil && session.plugins.Runs != nil {
+			runs := session.plugins.Runs
+			// End runs that no project owned and refuse new ones during shutdown.
+			session.background(nil, 0, func(context.Context) func(*App) {
+				runs.StopAll()
+				return nil
+			})
+		}
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for _, session := range sessions {
+			session.wait()
+		}
+	}()
+	timer := time.NewTimer(shutdownWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+		a.backgroundFailed(shutdownWaitOperation, context.DeadlineExceeded)
+	}
 }
 
 // watchFaults has Viva hand each panic it recovers in a callback to the client's log, as
@@ -1124,14 +1338,13 @@ func (a *App) systemAppearanceChanged() {
 	})
 }
 
-// closed runs when the window has closed: the project closes, and so does the log window,
-// which would otherwise keep the application running without the window it belongs to.
+// closed releases auxiliary windows. Project close requests run before OnClosed,
+// and shutdownSessions takes care of projects left over when the loop returns.
 func (a *App) closed() {
 	a.unsubscribeSettings()
 	a.closeClone()
 	a.closeNewProject()
-	a.closeProject()
-	a.settingsWindow.Close()
+	a.closeSettingsWindow()
 	a.stopUpdates()
 }
 
@@ -1364,9 +1577,18 @@ func (a *App) saveSettings() {
 	// The background is the window's, which another tab may have changed since this one loaded.
 	a.settings.WorkbenchBackground = a.savedBackgroundState()
 	a.updates.store(&a.settings)
-	if err := a.store.Save(settingsFile, a.settings); err != nil {
+	backup, err := a.saveSettingsSnapshot()
+	a.reportSettingsSave(backup, err)
+}
+
+func (a *App) reportSettingsSave(backup string, err error) {
+	if backup != "" {
+		a.noticeSettingsBackup(backup)
+	}
+	if err != nil {
 		a.operationFailed("settings_save", documentLogError(err))
 		a.notifyError(a.text.Errors.SaveFailed(err.Error()))
+		return
 	}
 }
 
@@ -1551,10 +1773,12 @@ func (a *App) openProjectHere(path string) {
 func (a *App) openProjectWithTrust(root string, trusted bool) {
 	a.requestCloseProject(func() {
 		a.reduceRecent(a.recent, core.RecordRecent(root, a.now()), true)
-		// Every Git command the project runs is kept in the Git console.
-		ctx, cancel := context.WithCancel(core.WithGitConsole(context.Background(), a.gitConsole, root))
-		p := &project{root: root, name: filepath.Base(root), ctx: ctx, cancel: cancel, commit: newCommitState()}
+		p := &project{root: root, name: filepath.Base(root), commit: newCommitState()}
 		p.trust.codeAllowed.Store(trusted)
+		// Every Git command the project runs is kept in the Git console, and in safe mode Core
+		// runs none: the repository's configuration can name programs Git runs (#2208).
+		ctx := core.WithProjectCodeAllowed(core.WithGitConsole(context.Background(), a.gitConsole, root), p.trust.allowed)
+		p.ctx, p.cancel = context.WithCancel(ctx)
 		a.searchView.reset()
 		a.openTerminals(p)
 		a.project = p
@@ -1577,6 +1801,7 @@ func (a *App) openProjectWithTrust(root string, trusted bool) {
 		// a model runs the plugin's model command, such as mvn, which runs the project's build
 		// extensions, so in safe mode the models stay unloaded until the user trusts the project.
 		a.loadTitleRunConfigs(p)
+		a.checkPluginRecommendations(p)
 		a.restoreEditorSession(p)
 		a.restoreCheckpoints(p)
 		a.openPendingFiles(p)
@@ -1608,7 +1833,10 @@ func (a *App) requestCloseProject(after func()) {
 		if after != nil {
 			lifecycle = exitContextQuit
 		}
-		a.confirmProcessExit(p, lifecycle, func() { a.finishCloseProject(p, after) })
+		a.confirmProcessExit(p, lifecycle, func() {
+			// A remote workspace then decides the programs its host runs (remote_close.go).
+			a.confirmRemoteClose(p, func() { a.finishCloseProject(p, after) })
+		})
 	})
 }
 
@@ -1619,63 +1847,71 @@ func (a *App) finishCloseProject(p *project, after func()) {
 	if a.project != p {
 		return
 	}
-	{
-		a.saveEditorSession(p)
-		a.closePluginViews(p)
-		a.releaseIndexing(p)
-		a.closeEverywhere(p)
-		a.recentFiles.open = false
-		a.recentFiles.generation++
-		a.recentFiles.lastEdited = 0
-		a.recentFiles.list = nil
-		a.recentFiles.listState = ui.ListState{}
-		a.drafts.open, a.drafts.loading = false, false
-		a.drafts.generation++
-		a.drafts.entries = nil
-		a.drafts.list = ui.ListState{}
-		if a.navigation.open && a.navigation.project == p {
-			a.closeNavigation()
-		}
-		a.cancelPrompts()
-		a.ideAPIDisable(p)
-		p.cancel()
-		a.closePluginPages()
-		a.closePreviewPages()
-		a.closeTree(p)
-		a.closeGitObservation(p)
-		a.releaseProjectSearch(p)
-		a.closeDocuments(p)
-		p.closeDiffs()
-		a.closeTerminals(p)
-		// A test run owns a process or provider request, so it is stopped before
-		// the build providers it borrowed close.
-		a.stopTestsForProject(p)
-		a.stopDebugForProject(p)
-		a.stopRunsForProject(p)
-		// Build providers and prepared applications belong to the workspace and
-		// are stopped before the project state is dropped.
-		a.stopBuild(p)
-		// Version control provider sessions run in the workspace too.
-		a.stopVcs(p)
-		// A language server is bound to the workspace it was started for, so it goes
-		// with the project rather than outliving it.
-		a.stopAllPluginServers()
-		a.clearAllPluginDiagnostics()
-		a.problems.reset()
-		a.toolchainRoot.Store(nil)
-		a.project = nil
-		a.ideAPISetProject(nil)
-		a.focus = focusTarget{}
-		a.dnd.tool.Cancel()
-		a.dnd.tab.Cancel()
-		a.drag, a.term.drag = dragState{}, tabDrag{}
-		a.title = titleState{}
-		a.branch.branchSession = branchSession{}
-		if after != nil {
-			after()
-		} else {
-			// A project closed on its own leaves its tab when the window has others.
-			a.sessions.leave(a)
-		}
+	a.disposeProject(p)
+	if after != nil {
+		after()
+	} else {
+		// A project closed on its own leaves its tab when the window has others.
+		a.sessions.leave(a)
 	}
+}
+
+// disposeProject releases a project after close approval or after the window
+// loop has returned. It does not ask questions or switch tabs.
+func (a *App) disposeProject(p *project) {
+	a.saveEditorSession(p)
+	a.closePluginViews(p)
+	a.releaseIndexing(p)
+	a.closeEverywhere(p)
+	a.recentFiles.open = false
+	a.recentFiles.generation++
+	a.recentFiles.lastEdited = 0
+	a.recentFiles.list = nil
+	a.recentFiles.listState = ui.ListState{}
+	a.drafts.open, a.drafts.loading = false, false
+	a.drafts.generation++
+	a.drafts.entries = nil
+	a.drafts.list = ui.ListState{}
+	if a.navigation.open && a.navigation.project == p {
+		a.closeNavigation()
+	}
+	a.cancelPrompts()
+	a.ideAPIDisable(p)
+	a.closeRemoteWorkspace(p)
+	p.cancel()
+	a.closePluginPages()
+	a.closePreviewPages()
+	a.closeTree(p)
+	a.closeGitObservation(p)
+	a.releaseProjectSearch(p)
+	a.closeDocuments(p)
+	p.closeDiffs()
+	a.closeTerminals(p)
+	// A test run owns a process or provider request, so it is stopped before
+	// the build providers it borrowed close.
+	a.stopTestsForProject(p)
+	a.stopDebugForProject(p)
+	a.stopRunsForProject(p)
+	// Build providers and prepared applications belong to the workspace and
+	// are stopped before the project state is dropped.
+	a.stopBuild(p)
+	// Version control provider sessions run in the workspace too.
+	a.stopVcs(p)
+	// A language server is bound to the workspace it was started for, so it goes
+	// with the project rather than outliving it.
+	a.stopAllPluginServers()
+	a.clearAllPluginDiagnostics()
+	a.problems.reset()
+	a.toolchainRoot.Store(nil)
+	a.publishWorkspaceBuildOptions(nil)
+	a.project = nil
+	a.chrome.setRemote(false)
+	a.ideAPISetProject(nil)
+	a.focus = focusTarget{}
+	a.dnd.tool.Cancel()
+	a.dnd.tab.Cancel()
+	a.dnd.run.Cancel()
+	a.drag, a.term.drag, a.dnd.runDrag = dragState{}, tabDrag{}, runDragState{}
+	a.title = titleState{}
+	a.branch.branchSession = branchSession{}
 }

@@ -55,7 +55,8 @@ func (a *App) worktreePageView(c ui.C) {
 	})
 }
 
-// shownWorktrees are the worktrees whose path or branch holds the search's text.
+// shownWorktrees are the worktrees whose path or branch holds the search's text: in a remote
+// workspace, the host path.
 func (a *App) shownWorktrees(p *project) []core.GitWorktree {
 	query := strings.ToLower(strings.TrimSpace(a.worktreeView.search.Text()))
 	if query == "" {
@@ -63,7 +64,7 @@ func (a *App) shownWorktrees(p *project) []core.GitWorktree {
 	}
 	var shown []core.GitWorktree
 	for _, w := range p.worktrees.list {
-		if strings.Contains(strings.ToLower(w.Path), query) || strings.Contains(strings.ToLower(w.Branch), query) {
+		if strings.Contains(strings.ToLower(p.remoteHostPath(w.Path)), query) || strings.Contains(strings.ToLower(w.Branch), query) {
 			shown = append(shown, w)
 		}
 	}
@@ -151,8 +152,8 @@ func (a *App) drawWorktreeStale(c ui.C, p *project, stale int) {
 // drawWorktreeEmpty declares a message with its hint that stands for an empty pane.
 func (a *App) drawWorktreeEmpty(c ui.C, title, hint string) {
 	ui.Column(c).Fill().Center().Gap(6).PadX(shellContentPad).Children(func() {
-		ui.Paragraph(c, title, 2).TextCenter().Weight(gfx.WeightMedium)
-		ui.Paragraph(c, hint, 4).TextCenter().FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
+		ui.Paragraph(c, title, 2).FillWidth().TextCenter().Weight(gfx.WeightMedium)
+		ui.Paragraph(c, hint, 4).FillWidth().TextCenter().FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 	})
 }
 
@@ -162,7 +163,7 @@ func (a *App) drawWorktreeRow(p *project, shown []core.GitWorktree, row ui.ListR
 		return
 	}
 	w, c := shown[row.Index], row.C
-	item := row.Element.FillWidth().PadX(10).PadY(5).Gap(8).Items(ui.Center).Tooltip(w.Path)
+	item := row.Element.FillWidth().PadX(10).PadY(5).Gap(8).Items(ui.Center).Tooltip(p.remoteHostPath(w.Path))
 	if w.Path == p.worktrees.selected {
 		item = item.Background(a.colors.Selection)
 	} else {
@@ -197,6 +198,9 @@ func (a *App) worktreeRowMenu(row ui.ListRow, p *project, w core.GitWorktree) {
 	}
 	ui.ContextMenu(c, row.Element, func(menu *ui.MenuItems) {
 		ws, t := &p.worktrees, &a.text.Worktrees
+		// A remote workspace's worktrees are host folders: a new client opens local folders only, and
+		// the file browser shows this computer's.
+		remote := p.remote != nil
 		menu.WidthRange(180, 260)
 		item := func(label string, disabled bool, action string, run func()) {
 			if menu.Item(label).Disabled(disabled).Clicked() {
@@ -207,8 +211,8 @@ func (a *App) worktreeRowMenu(row ui.ListRow, p *project, w core.GitWorktree) {
 			}
 		}
 		item(t.OpenCurrent, w.IsCurrent || w.IsPrunable || w.IsBare, "git.worktree.open", func() { a.openWorktree(w.Path) })
-		item(i18n.Shared(a.language(), "desktop.worktree.openNewWindow"), w.IsPrunable || w.IsBare, "git.worktree.openNewWindow", func() { a.openWorktreeInNewWindow(w.Path) })
-		item(t.Reveal, w.IsPrunable, "git.worktree.reveal", func() { a.revealWorktree(w.Path) })
+		item(i18n.Shared(a.language(), "desktop.worktree.openNewWindow"), remote || w.IsPrunable || w.IsBare, "git.worktree.openNewWindow", func() { a.openWorktreeInNewWindow(w.Path) })
+		item(t.Reveal, remote || w.IsPrunable, "git.worktree.reveal", func() { a.revealWorktree(w.Path) })
 		item(t.CopyPath, false, "git.worktree.copyPath", func() { a.copyWorktreePath(w.Path) })
 		menu.Separator()
 		lock := t.Lock
@@ -308,7 +312,7 @@ func (a *App) drawWorktreeOverview(c ui.C, p *project, w core.GitWorktree) {
 	status := ws.statusOf(w)
 	ui.Scroll(c).Scrollbars().Grow(1).FillWidth().Pad(shellContentPad).Gap(12).Children(func() {
 		a.worktreeCard(c, t.BasicInformation, func() {
-			a.worktreeField(c, t.Path, w.Path)
+			a.worktreeField(c, t.Path, p.remoteHostPath(w.Path))
 			a.worktreeField(c, t.Branch, a.worktreeBranchText(w))
 			head := w.Head
 			if len(head) > 12 {
@@ -374,6 +378,7 @@ func (a *App) drawWorktreeOverview(c ui.C, p *project, w core.GitWorktree) {
 // used is named by the reason, which its hover hint shows.
 func (a *App) drawWorktreeActions(c ui.C, p *project, w core.GitWorktree) {
 	ws, t := &p.worktrees, &a.text.Worktrees
+	remote := p.remote != nil
 	action := func(label, blocked string, icon gfx.Icon, disabled bool, run func()) {
 		if blocked != "" {
 			label = blocked
@@ -383,8 +388,8 @@ func (a *App) drawWorktreeActions(c ui.C, p *project, w core.GitWorktree) {
 		}
 	}
 	action(t.OpenCurrent, "", icons.FolderOpen, w.IsCurrent || w.IsPrunable || w.IsBare, func() { a.openWorktree(w.Path) })
-	action(i18n.Shared(a.language(), "desktop.worktree.openNewWindow"), "", icons.FolderOpen, w.IsPrunable || w.IsBare, func() { a.openWorktreeInNewWindow(w.Path) })
-	action(t.Reveal, "", icons.Folder, w.IsPrunable, func() { a.revealWorktree(w.Path) })
+	action(i18n.Shared(a.language(), "desktop.worktree.openNewWindow"), "", icons.FolderOpen, remote || w.IsPrunable || w.IsBare, func() { a.openWorktreeInNewWindow(w.Path) })
+	action(t.Reveal, "", icons.Folder, remote || w.IsPrunable, func() { a.revealWorktree(w.Path) })
 	action(t.CopyPath, "", icons.Copy, false, func() { a.copyWorktreePath(w.Path) })
 	lockLabel, lockIcon := t.Lock, icons.Lock
 	if w.IsLocked {
@@ -687,29 +692,30 @@ func (a *App) drawWorktreeDialog(c ui.C, p *project) {
 		a.drawWorktreeCreateDialog(c, p)
 	case worktreeDialogRemove:
 		name := worktreeName(w.target)
-		a.worktreeConfirm(c, t.RemoveTitle, t.RemovePrompt(name), "", t.RemoveButton, func() { a.removeWorktree(p, false) })
+		a.worktreeConfirm(c, t.RemoveTitle, t.RemovePrompt(name), "", "", t.RemoveButton, func() { a.removeWorktree(p, false) })
 	case worktreeDialogReview:
-		name := worktreeName(w.target)
-		a.worktreeConfirm(c, t.RemoveTitle, t.RemovePrompt(name), w.refusal, t.ReviewForce, func() {
+		a.worktreeConfirm(c, t.RemoveTitle, t.RemovePrompt(worktreeName(w.target)), w.target.Path, w.refusal, t.ReviewForce, func() {
 			p.worktrees.dialog = worktreeDialogForce
 		})
 	case worktreeDialogForce:
-		a.worktreeConfirm(c, t.ForceTitle, t.ForcePrompt(worktreeName(w.target)), "", t.ForceButton, func() {
+		a.worktreeConfirm(c, t.ForceTitle, t.ForcePrompt(worktreeName(w.target)), w.target.Path, "", t.ForceButton, func() {
 			a.performed("git.worktree.forceRemove", surfaceButton)
 			a.removeWorktree(p, true)
 		})
 	case worktreeDialogPrune:
-		a.worktreeConfirm(c, t.PruneTitle, t.PrunePrompt, "", t.Prune, func() { a.pruneWorktrees(p) })
+		a.worktreeConfirm(c, t.PruneTitle, t.PrunePrompt, "", "", t.Prune, func() { a.pruneWorktrees(p) })
 	}
 }
 
-// worktreeConfirm declares a dialog that asks before a destructive write; note, when not
-// empty, is what Git said, shown under the question.
-func (a *App) worktreeConfirm(c ui.C, title, prompt, note, confirm string, run func()) {
+// worktreeConfirm asks before a destructive write and can show a target path and Git's refusal.
+func (a *App) worktreeConfirm(c ui.C, title, prompt, targetPath, note, confirm string, run func()) {
 	t := &a.text.Worktrees
 	busy := a.project != nil && a.project.worktrees.busy
 	open := true
 	body := func() {
+		if targetPath != "" {
+			a.drawGitRemovalPath(c, targetPath)
+		}
 		if note != "" {
 			ui.Paragraph(c, note, 6).FontSize(a.theme.Metrics.FontSizeS).Color(a.theme.Danger)
 		}
@@ -722,7 +728,7 @@ func (a *App) worktreeConfirm(c ui.C, title, prompt, note, confirm string, run f
 			c.After(run)
 		}
 	}
-	if ui.ModalWith(c, &open, title, ui.ModalSpec{Description: prompt, Width: branchDialogWidth}, body, footer) {
+	if ui.Modal(c, &open, title, ui.ModalSpec{Description: prompt, Width: branchDialogWidth}, body, footer) {
 		c.After(a.cancelWorktreeDialog)
 	}
 }
@@ -806,6 +812,8 @@ func (a *App) drawWorktreeCreateDialog(c ui.C, p *project) {
 			submitted = ui.TextField(c, &cr.destination, t.Destination, t.Destination).FillWidth().Submitted() || submitted
 			if !cr.result.DestinationIsAbsolute {
 				ui.Paragraph(c, t.DestinationAbsolute, 3).FontSize(a.theme.Metrics.FontSizeS).Color(a.theme.Danger)
+			} else if p.remote != nil {
+				ui.Paragraph(c, i18n.Shared(a.language(), "desktop.remote.worktree.destination"), 3).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 			}
 			ui.Checkbox(c, &cr.noCheckout, t.NoCheckout).Disabled(w.busy)
 			if cr.noCheckout {
@@ -827,7 +835,7 @@ func (a *App) drawWorktreeCreateDialog(c ui.C, p *project) {
 			c.After(func() { a.submitCreateWorktree(p) })
 		}
 	}
-	if ui.ModalWith(c, &open, t.CreateTitle, ui.ModalSpec{Width: branchDialogWidth}, body, footer) {
+	if ui.Modal(c, &open, t.CreateTitle, ui.ModalSpec{Width: branchDialogWidth}, body, footer) {
 		c.After(a.cancelWorktreeDialog)
 	}
 	if submitted && ready {

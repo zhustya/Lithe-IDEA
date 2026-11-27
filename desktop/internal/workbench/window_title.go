@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 )
 
 // The system title of the window names what it shows, so the task switcher, the taskbar
@@ -22,6 +24,12 @@ func (a *App) windowTitle() string {
 	if p == nil {
 		return a.text.App.Name
 	}
+	if p.standalone {
+		if d := a.selectedEditorDocument(); d != nil {
+			return d.name + windowTitleSeparator + a.text.App.Name
+		}
+		return a.text.App.Name
+	}
 	title := a.projectDisplayName(p)
 	if runtime.GOOS == "darwin" {
 		return title
@@ -34,9 +42,13 @@ func (a *App) windowTitle() string {
 
 // projectDisplayName is the name the taskbar and Alt+Tab show for p: its folder's name, or
 // that name under the folder above it when another open tab shows a project of the same name,
-// so two checkouts of one repository do not look alike.
+// so two checkouts of one repository do not look alike. A remote workspace's name says the
+// connection it is on, as "folder [SSH: connection]" or "folder [WSL: distribution]".
 func (a *App) projectDisplayName(p *project) string {
 	name := p.name
+	if r := p.remote; r != nil {
+		return i18n.SharedFormat(a.language(), "desktop.remote.workspace.title", map[string]string{"folder": name, "kind": r.host.kind(a.language()), "connection": r.name})
+	}
 	if !a.projectNameShared(p) {
 		return name
 	}

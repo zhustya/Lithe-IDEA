@@ -95,7 +95,11 @@ func (a *App) documentEdited(p *project, d *document, edit editorview.Edit) {
 		return
 	}
 	a.scheduleAutoSave(p, d)
-	if a.plugins == nil || a.project != p || p.docs.byPath(d.path) != d {
+	if a.project != p || p.docs.byPath(d.path) != d {
+		return
+	}
+	a.scheduleColorDecorations(p, d, colorDecorationsDelay)
+	if a.plugins == nil {
 		return
 	}
 	// A definition or completion answer describes the text the trigger saw.
@@ -123,7 +127,8 @@ func (a *App) documentEdited(p *project, d *document, edit editorview.Edit) {
 // document; edits that arrive meanwhile stay queued.
 func (a *App) startDocumentSync(p *project, d *document) {
 	s := &d.sync
-	if s.running || a.plugins == nil || a.project != p {
+	// A remote workspace starts no language server (#2231): its documents name placeholder paths.
+	if s.running || a.plugins == nil || a.project != p || p.remote != nil {
 		return
 	}
 	server, pluginID := a.documentSyncServer(d)
@@ -325,6 +330,7 @@ func (a *App) releasePluginDocuments(pluginID string) {
 	if a.project == nil {
 		return
 	}
+	a.releaseSymbolHighlights(pluginID)
 	a.pluginSemanticsReset()
 	a.semanticTokensReleased(pluginID)
 	for _, d := range a.project.docs.list {
@@ -341,6 +347,7 @@ func (a *App) releaseAllPluginDocuments() {
 	if a.project == nil {
 		return
 	}
+	a.clearSymbolHighlights()
 	a.pluginSemanticsReset()
 	a.semanticTokensReleased("")
 	for _, d := range a.project.docs.list {

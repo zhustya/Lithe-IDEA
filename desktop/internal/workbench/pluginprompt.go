@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/icons"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
 	"github.com/vivaui/viva/ui"
 )
@@ -15,15 +16,19 @@ import (
 
 // pluginPrompt is one question to the user.
 type pluginPrompt struct {
+	quick *quickInputState
 	title string
 	text  string
 	// mono shows the text in a fixed-pitch font, for commands and paths.
 	mono    bool
 	actions []string
 	// check, when set, is the label of a checkbox under the text, such as "Don't ask
-	// again"; checked is its state, which onAnswer reads.
-	check   string
-	checked bool
+	// again"; checked is its state, which onAnswer reads. checkHelp, when set, is shown by an
+	// information button beside it.
+	check     string
+	checkFull string // original label when the caller shortened check
+	checked   bool
+	checkHelp string
 	// open is the flag the modal that shows the prompt keeps.
 	open bool
 	// answer receives the chosen index, or nil for a dismissal. It is buffered, so
@@ -62,6 +67,9 @@ func (a *App) askUser(ctx context.Context, prompt *pluginPrompt) (*int, error) {
 func (a *App) dropPrompt(prompt *pluginPrompt) {
 	for i, queued := range a.prompts.queue {
 		if queued == prompt {
+			if prompt.quick != nil {
+				prompt.quick.clear()
+			}
 			a.prompts.queue = append(a.prompts.queue[:i], a.prompts.queue[i+1:]...)
 			return
 		}
@@ -74,6 +82,13 @@ func (a *App) answerPrompt(choice *int) {
 		return
 	}
 	prompt := a.prompts.queue[0]
+	if prompt.quick != nil {
+		if choice != nil && *choice == 1 {
+			prompt.quick.accept()
+		} else {
+			prompt.quick.clear()
+		}
+	}
 	a.prompts.queue = a.prompts.queue[1:]
 	if prompt.onAnswer != nil {
 		prompt.onAnswer(choice)
@@ -117,7 +132,13 @@ func (a *App) pluginPromptView(c ui.C) {
 	// The modal is named by the prompt's own open flag, so a following prompt
 	// is a new dialog; it is raised again for each paint the prompt is first.
 	prompt.open = true
-	dismissed := ui.ModalWith(c, &prompt.open, prompt.title, ui.ModalSpec{Width: 520, Height: 320}, func() {
+	dismissed := ui.Modal(c, &prompt.open, prompt.title, ui.ModalSpec{Width: 520, Height: 320}, func() {
+		if prompt.quick != nil {
+			if a.quickInputBody(c, prompt.quick) {
+				chosen = 1
+			}
+			return
+		}
 		ui.Scroll(c).Scrollbars().Grow(1).FillWidth().Children(func() {
 			text := ui.Wrap(c, prompt.text).FontSize(13)
 			if prompt.mono {
@@ -125,14 +146,26 @@ func (a *App) pluginPromptView(c ui.C) {
 			}
 		})
 		if prompt.check != "" {
-			ui.Checkbox(c.Part("check"), &prompt.checked, prompt.check)
+			ui.Row(c.Part("checkRow")).Items(ui.Center).Gap(4).Children(func() {
+				check := ui.Checkbox(c.Part("check"), &prompt.checked, prompt.check)
+				if prompt.checkFull != "" {
+					check.OverflowTooltip(prompt.checkFull)
+				}
+				if prompt.checkHelp != "" {
+					ui.Button(c.Part("checkHelp"), i18n.Shared(a.language(), "native.moreInformation")).Icon(icons.Info).IconOnly().Ghost().Size(18, 18).Shrink(0).
+						Tooltip(prompt.checkHelp)
+				}
+			})
 		}
 	}, func() {
 		for i, action := range prompt.actions {
 			button := ui.Button(c.KeyInt(i), action)
+			if prompt.quick != nil && i == 1 {
+				button = button.Disabled(!prompt.quick.ready)
+			}
 			if i < len(prompt.actions)-1 {
 				button.Outline()
-			} else {
+			} else if prompt.quick == nil {
 				button.AutoFocus()
 			}
 			if button.Clicked() {

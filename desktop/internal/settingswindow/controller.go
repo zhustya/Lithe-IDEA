@@ -15,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/1lck/Lithe-IDEA/desktop/internal/cli"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/fileassociations"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/fontprefs"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/localshell"
@@ -25,6 +27,7 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginsettings"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/toolchain"
 	"github.com/vivaui/viva/app"
+	"github.com/vivaui/viva/gfx"
 )
 
 // PluginState is what the plugin page shows about one plugin.
@@ -53,15 +56,18 @@ type Values struct {
 	EditorPreferences       core.EditorPreferences
 	EditorStoredPreferences core.EditorStoredPreferences
 	KeymapSchemes           core.KeymapSchemes
-	// MarketplaceQuery is the text the marketplace search starts with when the window opens on
-	// the plugin page; empty leaves it as it is.
-	MarketplaceQuery string
+	// MarketplaceQuery opens the Marketplace with that search. A nil query leaves the tab alone.
+	MarketplaceQuery *string
 	// Language is a stored i18n language code ("en", "zh-Hans"); empty follows the system.
 	Language string
 	// Theme is "light" or "dark"; empty follows the system's look.
 	Theme string
 	// MarketplaceWidth is a layout preference, applied on completed resize, not a draft setting.
 	MarketplaceWidth float32
+	// WindowWidth and WindowHeight are the size the window opens at, the one the user last
+	// gave it (Options.WindowResized); zero opens it at its default size. Like
+	// MarketplaceWidth they are a layout preference, not a draft setting.
+	WindowWidth, WindowHeight int
 	// EditorTabRows is TabRowsMultiple when an editor group's tabs wrap onto more rows; empty
 	// keeps them in one row. EditorTabOverflow says what one row does with tabs that do not
 	// fit: TabOverflowSqueeze makes them narrower, and empty scrolls them sideways.
@@ -113,6 +119,8 @@ type Values struct {
 	ProjectOpenDestination string
 	// DisableSemanticHighlight keeps the syntax colors alone; semantic coloring is on by default.
 	DisableSemanticHighlight bool
+	// DisableAutoCompletion suppresses suggestions triggered by typing.
+	DisableAutoCompletion bool
 	// VimMode turns on the Vim keys of the editor (Normal, Insert and Visual modes); off by default.
 	VimMode bool
 	// DisableAutoSave stops saving changed files a moment after typing stops; auto-save is
@@ -252,6 +260,15 @@ type ToolchainTrustLoader interface {
 	SetWorkspaceTrust(context.Context, toolchain.Snapshot, bool) (toolchain.Snapshot, error)
 }
 
+// TrustedLocationsLoader reads and writes the folders whose every workspace this machine
+// trusts. Preview asks Core what draft changes lead to without writing; Save writes them
+// against the bytes the list was read from and re-reads it. All calls run off the window thread.
+type TrustedLocationsLoader interface {
+	LoadTrustedLocations(context.Context) (toolchain.TrustedLocations, error)
+	PreviewTrustedLocations(context.Context, toolchain.TrustedLocations, []toolchain.LocationChange) ([]string, error)
+	SaveTrustedLocations(context.Context, toolchain.TrustedLocations, []toolchain.LocationChange) (toolchain.TrustedLocations, error)
+}
+
 // ToolchainRuntimePreparer downloads or repairs a plugin's managed runtimes
 // from the Toolchains settings page, then reloads its snapshot.
 type ToolchainRuntimePreparer interface {
@@ -280,6 +297,11 @@ type PluginViewLoader interface {
 	View(ctx context.Context, editor pluginservice.SettingsEditor, region, function string, event, view json.RawMessage, closing bool) (json.RawMessage, bool, error)
 }
 
+// PluginViewWatcher connects backend invalidations to a visible settings region.
+type PluginViewWatcher interface {
+	WatchView(pluginID, instance string, refresh func()) func()
+}
+
 // PluginSourceSettingsLoader publishes only explicitly saved native-source drafts.
 type PluginSourceSettingsLoader interface {
 	SaveSources(context.Context, pluginservice.SettingsEditor, string, pluginsettings.SourceEditor, []core.SourceSettingsEdits) (pluginsettings.SourceEditor, error)
@@ -293,15 +315,17 @@ type CommandInstaller interface {
 	// the launches look them up. A plugin whose commands are all found has none.
 	Missing(ctx context.Context, pluginID string) ([]MissingCommand, error)
 	// Offer prepares what the install dialog shows for one installer: the tool that runs, and
-	// each target's command line and directory. It installs nothing; it may run the tool's
-	// directory probes, which only print where the tool installs.
+	// each target's command line and directory, or the archive a download installer fetches.
+	// It installs nothing; it may run the tool's directory probes, which only print where the
+	// tool installs.
 	Offer(ctx context.Context, pluginID, installerID string) (CommandInstallOffer, error)
-	// Install runs the installer for the target the user chose, handing each line the tool
-	// prints to output as it arrives, and returns the directory its commands are in once they
-	// are found there. Cancelling ctx stops the tool. A failed installation is a
-	// *pluginhost.CommandInstallError when the tool ran, and a *toolchain.UnavailableError
-	// from Offer or Install when the tool is not found.
-	Install(ctx context.Context, pluginID, installerID, target string, output func(string)) (string, error)
+	// Install runs the installer for the target the user chose and returns the directory its
+	// commands are in once they are found there. A tool hands each line it prints to output as
+	// it arrives; a download reports its phases to progress, from any goroutine. Cancelling
+	// ctx stops the tool or the transfer. A failed installation is a
+	// *pluginhost.CommandInstallError when the tool ran or the download failed, and a
+	// *toolchain.UnavailableError from Offer or Install when the tool is not found.
+	Install(ctx context.Context, pluginID, installerID, target string, output func(string), progress func(pluginruntime.Progress)) (string, error)
 }
 
 // MissingCommand is one launch of a plugin none of whose commands the host finds.
@@ -314,7 +338,8 @@ type MissingCommand struct {
 	// Installer is the ID of the installer that provides them, or "" when the plugin declares
 	// none and the user has to install them another way.
 	Installer string
-	// Tool is the display name of the tool the installer runs; empty without an installer.
+	// Tool is the display name of the tool the installer runs; empty without an installer and
+	// for a download installer, which runs no tool.
 	Tool string
 }
 
@@ -323,14 +348,29 @@ type CommandInstallOffer struct {
 	Installer string
 	// Commands are the commands the installation provides.
 	Commands []string
-	// Tool is the tool definition that runs it, and Executable the program resolved for it.
+	// Tool is the tool definition that runs it, and Executable the program resolved for it;
+	// both empty for a download.
 	Tool, Executable string
+	// Download is the archive a download installer fetches; nil for a tool installer.
+	Download *CommandInstallDownload
 	// MayUseNetwork says the installation may download.
 	MayUseNetwork bool
 	// Timeout is how long the installation may run.
 	Timeout time.Duration
-	// Targets are the places the user may install into, managed first.
+	// Targets are the places the user may install into, managed first. A download has only
+	// managed, without a command line.
 	Targets []CommandInstallTarget
+}
+
+// CommandInstallDownload is the archive a download installer fetches for this host.
+type CommandInstallDownload struct {
+	// Version is the pinned upstream version.
+	Version string
+	// URL is where the archive is fetched from, and Mirrors the fallbacks for the same bytes.
+	URL     string
+	Mirrors []string
+	// SHA256 is the digest the archive must have; anything else is discarded unextracted.
+	SHA256 string
 }
 
 // CommandInstallTarget is one place an installation can put its commands.
@@ -354,10 +394,16 @@ type SearchPreferencesSource interface {
 
 // Options configure the settings window.
 type Options struct {
+	CLI              *cli.Manager
+	CLIAction        func(string)
+	FileAssociations *fileassociations.Manager
+	// AssociationAction and AssociationError retain the originating settings operation.
+	AssociationAction func(context.Context, string) context.Context
+	AssociationError  func(context.Context, error)
 	SearchPreferences SearchPreferencesSource
 	// PluginInstallsClosed releases downloads retained by the settings session.
 	PluginInstallsClosed func()
-	// GitHub is the account the Version Control page shows and drives; nil hides the card.
+	// GitHub is the account the Git settings page shows and drives; nil hides the card.
 	GitHub *GitHubAccount
 	// SettingsError logs a failure of the window, with the operation that failed as the log
 	// names it (plugin_settings_surface, keymap_schemes, settings_about_copy, ...).
@@ -366,6 +412,10 @@ type Options struct {
 	SettingsNavigation func(context.Context, []core.SettingsNavigationItem, string) ([]core.SettingsNavigationRow, error)
 	// Marketplace fetches the enabled source only while the plugin page is open.
 	Marketplace func(context.Context) (marketplace.Snapshot, error)
+	// MarketplaceIcon reads and compiles a validated entry's SVG off the UI
+	// thread. MarketplaceIconError records a failed read before initials are used.
+	MarketplaceIcon      func(context.Context, string) (gfx.Icon, error)
+	MarketplaceIconError func(error)
 	// MarketplaceURL and OfficialMarketplaceURL are the addresses Marketplace and
 	// MarketplaceOfficial read, which the repositories dialog shows.
 	MarketplaceURL         string
@@ -388,6 +438,12 @@ type Options struct {
 	MarketplaceRejected func(int)
 	// MarketplaceResized persists a completed splitter gesture or keyboard step.
 	MarketplaceResized func(float32)
+	// WindowResized keeps the size the user gave the window, for Values.WindowWidth and
+	// WindowHeight of the next one. It runs once, on the settings window's thread, when the
+	// window closes at a size other than the one it opened at, so it must hand the size to
+	// its owner. An owner that closes the window as it closes itself takes the size from
+	// Controller.ResizedWindow first, because this report comes after the close.
+	WindowResized func(width, height int)
 	// PluginState reports what the plugin page shows about one plugin. It is read
 	// while painting, so it must answer from memory rather than from disk. Nil
 	// treats every plugin as not installed and hides the plugin actions.
@@ -409,6 +465,11 @@ type Options struct {
 	CommandInstalls CommandInstaller
 	// UninstallPlugin removes the installed version of a plugin.
 	UninstallPlugin func(id string)
+	// PluginReleases lists the published releases of the source repository a plugin's
+	// marketplace listing names, newest first, for the Installed tab's changelog. supported is
+	// false, with no error, when the repository is not one it can read releases from. It runs
+	// on a worker and must return when ctx is done; nil shows no changelog tab.
+	PluginReleases func(ctx context.Context, repository string) (releases []PluginRelease, supported bool, err error)
 	// InstallPluginFromFile installs a plugin package the user picked on disk. The
 	// package is reviewed like a marketplace one before anything is written.
 	InstallPluginFromFile func(path string, feedback PluginInstallFeedback)
@@ -492,9 +553,6 @@ type Options struct {
 	// is false until Core has answered. Nil hides the stop time, for a platform where a
 	// stopped program is ended at once.
 	StopTime func() (rule StopTime, ok bool)
-	// SweepsLeftovers says the client finds, at start-up, the processes an earlier run left
-	// behind; false hides the setting for them.
-	SweepsLeftovers bool
 	// SetKeymap hands a change of Values.Keymap to the settings owner, like SetTabRows.
 	SetKeymap            func(shortcuts.Overrides)
 	SetEditorPreferences func(core.EditorStoredPreferences, core.EditorPreferences)
@@ -559,6 +617,8 @@ type Options struct {
 	// SetDisableSemanticHighlight hands a change of Values.DisableSemanticHighlight to the
 	// settings owner, like SetHideGitGutter.
 	SetDisableSemanticHighlight func(bool)
+	// SetDisableAutoCompletion hands a change of Values.DisableAutoCompletion to the settings owner.
+	SetDisableAutoCompletion func(bool)
 	// SetVimMode hands a change of Values.VimMode to the settings owner, like
 	// SetDisableSemanticHighlight.
 	SetVimMode func(bool)
@@ -590,12 +650,33 @@ type Options struct {
 // Controller opens the settings window and keeps at most one open: opening it again brings
 // the open one to the front and keeps its current page and values.
 type Controller struct {
-	opts Options
+	opts             Options
+	workspaceOptions map[string][]WorkspaceBuildOptions // immutable after publication, guarded by mu
 
 	// mu guards current: Open runs on the window thread of the window that asks, and
 	// OnClosed on the settings window's.
 	mu      sync.Mutex
 	current *window
+}
+
+// WorkspaceBuildOptions identifies the editor for one detected instance of a build system.
+type WorkspaceBuildOptions struct {
+	InstanceID, PluginID, Name, Root string
+	Open                             func()
+}
+
+// SetWorkspaceBuildOptions publishes a new snapshot from the workbench window thread.
+func (c *Controller) SetWorkspaceBuildOptions(options map[string][]WorkspaceBuildOptions) {
+	c.mu.Lock()
+	c.workspaceOptions = options
+	c.mu.Unlock()
+	c.Invalidate()
+}
+
+func (c *Controller) buildOptionsFor(system string) []WorkspaceBuildOptions {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.workspaceOptions[system]
 }
 
 // NewController returns a controller with no window open.
@@ -642,8 +723,8 @@ func (c *Controller) OpenPlugins(application *app.Application, current Values) e
 // OpenPluginsWithQuery shows the plugin page with the marketplace search set to query, which
 // is what "Find in Marketplace" asks for; an open window takes the query too.
 func (c *Controller) OpenPluginsWithQuery(application *app.Application, current Values, query string) error {
-	current.MarketplaceQuery = query
-	return c.openWithQuery(application, current, pagePlugins, query)
+	current.MarketplaceQuery = &query
+	return c.open(application, current, pagePlugins)
 }
 
 // OpenTerminal opens the Terminal page under Tools, including when a settings window is
@@ -657,10 +738,10 @@ func (c *Controller) OpenKeymap(application *app.Application, current Values) er
 	return c.open(application, current, pageKeymap)
 }
 
-// OpenVersionControl shows the window on the Version Control page, where the Git console's
-// settings button leads.
-func (c *Controller) OpenVersionControl(application *app.Application, current Values) error {
-	return c.open(application, current, pageVersionControl)
+// OpenGit shows the window on the Git page under Version Control, where the settings buttons
+// of the Git console and the Git Log lead.
+func (c *Controller) OpenGit(application *app.Application, current Values) error {
+	return c.open(application, current, pageGit)
 }
 
 // OpenToolchains shows the window on the Toolchains page under Build, Execution, Deployment,
@@ -676,20 +757,19 @@ func (c *Controller) OpenAI(application *app.Application, current Values) error 
 
 // open shows the window on page, or, with noPage, on the page it already has or starts on.
 func (c *Controller) open(application *app.Application, current Values, page pageID) error {
-	return c.openWithQuery(application, current, page, "")
-}
-
-// openWithQuery is open that also sets the marketplace search to query when it is not empty.
-func (c *Controller) openWithQuery(application *app.Application, current Values, page pageID, query string) error {
 	c.mu.Lock()
 	if open := c.current; open != nil && open.win != nil && !open.win.Closed() && !open.sess.finished.Load() {
 		win := open.win
-		if query != "" {
-			open.requestQuery(query)
+		if current.MarketplaceQuery != nil {
+			open.requestQuery(*current.MarketplaceQuery)
 		}
 		if page != noPage {
 			open.requestPage(page)
 		}
+		// A raised window may have shown the plugin page for a while: it reads the store again
+		// when what it shows is stale.
+		open.raised.Store(true)
+		open.inv.Invalidate()
 		c.mu.Unlock()
 		win.Show()
 		return nil
@@ -723,6 +803,20 @@ func (c *Controller) Close() {
 	if current != nil && current.win != nil {
 		current.win.Close()
 	}
+}
+
+// ResizedWindow is the size the user gave the open window since it opened, with ok false
+// when no window is open or it still has the size it opened at. It is for an owner that
+// closes the window as it closes itself: Options.WindowResized reports the size only after
+// the close. It is safe from any goroutine.
+func (c *Controller) ResizedWindow() (width, height int, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.current == nil {
+		return 0, 0, false
+	}
+	size, resized := c.current.resized()
+	return size.width, size.height, resized
 }
 
 // Invalidate repaints the open settings window after shared application state changes.
@@ -782,6 +876,21 @@ type PluginFacts struct {
 	Programs []string
 	// Path is the installed package's directory.
 	Path string
+}
+
+// PluginRelease is one published release of a plugin's source repository, as the changelog
+// of the Installed tab shows it.
+type PluginRelease struct {
+	// Tag is the release's tag and Name its title; an untitled release leaves Name empty.
+	Tag, Name string
+	// Notes are the release's notes in Markdown; empty when the release has none.
+	Notes string
+	// Published is when the release was published; zero when the host does not say.
+	Published time.Time
+	// Prerelease says the release is marked as a pre-release.
+	Prerelease bool
+	// URL is the release's page on the web.
+	URL string
 }
 
 // Where an installed package came from, as its approval records it.

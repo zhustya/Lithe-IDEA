@@ -160,7 +160,7 @@ func (a *App) softWrapSwitch(c ui.C) {
 		button = button.Hover(ui.Look{}.Background(a.colors.Hover))
 	}
 	button.Children(func() {
-		ui.Icon(k, icons.WrapText).Size(shellIconSize, shellIconSize).Color(icon).
+		ui.Icon(c, icons.WrapText).Size(shellIconSize, shellIconSize).Color(icon).
 			StateFrom(button).Hover(ui.Look{}.Color(a.colors.Text))
 	})
 	if button.Clicked() {
@@ -186,19 +186,27 @@ func (a *App) documentView(c ui.C, group string, d *document) {
 	}
 	if p := a.project; p != nil && !d.virtual {
 		items, shown := a.editorMenuItems(c, p, d), false
-		ui.ContextMenu(c.Key("menu"+name), box, func(menu *ui.MenuItems) {
+		ui.ContextMenu(c, box, func(menu *ui.MenuItems) {
 			shown = true
 			items(menu)
 		})
 		a.referenceMenuPainted(d, shown)
 		at := d.actionPanel.menuAt
-		ui.ContextMenuAt(c.Key("lanemenu"+name), box, &d.actionPanel.menuOpen, gfx.Point{X: at.X, Y: at.Y + at.Height}, a.editorActionLaneMenu(c, p, d))
+		ui.ContextMenuAt(c, box, &d.actionPanel.menuOpen, gfx.Point{X: at.X, Y: at.Y + at.Height}, a.editorActionLaneMenu(c, p, d))
 		a.gitGutterPeek(c, p, d, box)
 	}
 }
 
 // documentInput makes the handlers and the painter of document d, once, when it is opened.
 func (a *App) documentInput(p *project, d *document) {
+	var wasFocused bool
+	var textInput app.TextInput
+	var applyTextEvent func(app.TextEvent) (app.TextState, error)
+	onTextEvent := func(event app.TextEvent) (app.TextState, error) {
+		state, err := applyTextEvent(event)
+		a.syncSymbolHighlights(p, d)
+		return state, err
+	}
 	d.input = ui.Handlers{
 		Role:    gfx.RoleTerminal,
 		Key:     func(event gfx.KeyEvent) gfx.EventResult { return a.documentKey(p, d, event) },
@@ -211,13 +219,20 @@ func (a *App) documentInput(p *project, d *document) {
 		// Typing in the document's own editor points the language features back at it.
 		Text: func(ctx app.TextInputContext) *app.TextInput {
 			d.lens = nil
-			return d.view.TextInput(ctx)
+			input := d.view.TextInput(ctx)
+			if input == nil {
+				return nil
+			}
+			textInput = *input
+			applyTextEvent = input.OnEvent
+			textInput.OnEvent = onTextEvent
+			return &textInput
 		},
 	}
 	d.draw = func(dc *ui.DrawContext) {
 		v := d.view
 		prefs := a.editorPreferences
-		v.SetPresentation(editorview.Presentation{HideLineNumbers: !prefs.LineNumbers, ShowWhitespace: prefs.Whitespace, CursorStyle: prefs.CursorStyle, DisableCursorBlink: !prefs.CursorBlink})
+		v.SetPresentation(a.editorPresentation())
 		v.Bind(d.hit, d.input.Parts())
 		// The minimap's button was declared by the last paint; its click turns the minimap of
 		// every view off or on, so the views painted after it in this paint follow too.
@@ -253,7 +268,17 @@ func (a *App) documentInput(p *project, d *document) {
 		}
 		if dc.State.Focused {
 			p.docs.group = d.group
+			if !wasFocused {
+				// Focus can move between visible split editors without selecting a tab.
+				// Restore once after paint, keeping snapshots and requests off the draw path.
+				a.post(func(a *App) {
+					if a.project == p && a.editorFocus == d.id {
+						a.syncSymbolHighlights(p, d)
+					}
+				})
+			}
 		}
+		wasFocused = dc.State.Focused
 	}
 }
 
@@ -270,6 +295,9 @@ func (a *App) documentViewKey(p *project, d *document, view *editorview.View, ev
 	// A semantic request belongs to the caret it was placed at. Every key path ends here, so
 	// one sync covers arrows, edits and commands.
 	defer a.pluginSemanticsCaretSync()
+	if view == d.view {
+		defer a.syncSymbolHighlights(p, d)
+	}
 	if result := a.pluginSemanticsKey(event); result.Handled {
 		return result
 	}
@@ -305,6 +333,9 @@ func (a *App) documentPointer(p *project, d *document, event gfx.PointerEvent) g
 	// A semantic popup or request belongs to the caret and symbol it was opened at; any
 	// pointer work that moved either closes it before the frame paints.
 	defer a.pluginSemanticsCaretSync()
+	if result, handled := a.editorActionHoverPointer(event, p, d); handled {
+		return result
+	}
 	if result, handled := a.inlayHintPointer(event, p, d, d.view); handled {
 		return result
 	}
@@ -314,7 +345,10 @@ func (a *App) documentPointer(p *project, d *document, event gfx.PointerEvent) g
 	if result, handled := a.pluginSemanticsPointer(event, p, d, d.view); handled {
 		return result
 	}
-	result, _ := d.view.Pointer(event)
+	result, handled := d.view.Pointer(event)
+	if handled {
+		a.syncSymbolHighlights(p, d)
+	}
 	return result
 }
 
@@ -330,7 +364,7 @@ func (a *App) terminalView(c ui.C, t *terminal) {
 			box := ui.Control(c.Part(name), a.text.Terminal.Label, &t.input).Fill().Draw(t.draw)
 			box.DropTarget(&a.dnd.tree, a.terminalTreeAccept, a.terminalTreeDrop)
 			ui.FocusBind(box, &a.focus, focusTarget{term: t.id})
-			a.terminalMenu(c, name, box, t)
+			a.terminalMenu(c, box, t)
 		})
 		return
 	}
@@ -338,7 +372,7 @@ func (a *App) terminalView(c ui.C, t *terminal) {
 	// A project tree row dropped on the terminal pastes its path (terminal_drop.go).
 	box.DropTarget(&a.dnd.tree, a.terminalTreeAccept, a.terminalTreeDrop)
 	ui.FocusBind(box, &a.focus, focusTarget{term: t.id})
-	a.terminalMenu(c, name, box, t)
+	a.terminalMenu(c, box, t)
 }
 
 // terminalInput makes the handlers and the painter of terminal t, once, when it is opened.
@@ -389,7 +423,11 @@ func (a *App) terminalTabs(c ui.C) {
 				Tooltip(a.text.Terminal.NewTab).Clicked() {
 				c.After(func() { a.openToolTerminal("") })
 			}
-			a.shellMenuButton(c)
+			// The shell menu lists this computer's programs; a remote workspace's terminal runs
+			// the host's login shell.
+			if a.project == nil || a.project.remote == nil {
+				a.shellMenuButton(c)
+			}
 		})
 		ui.Spacer(c)
 	})
@@ -473,6 +511,11 @@ func (a *App) onKey(event gfx.KeyEvent) gfx.EventResult {
 	}
 	if a.project != nil && a.everywhereView.open {
 		if result := a.everywhereKey(a.project, event); result.Handled {
+			return result
+		}
+	}
+	if p := a.project; p != nil && p.remote != nil && p.remote.hostFiles.open {
+		if result := a.remoteHostFilesKey(p, event); result.Handled {
 			return result
 		}
 	}

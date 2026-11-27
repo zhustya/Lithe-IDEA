@@ -31,6 +31,14 @@ const (
 // vcsView declares the window of the provider of it in project p.
 func (a *App) vcsView(c ui.C, p *project, it item) {
 	window, s, lang := it.vcs, &p.vcs, a.language()
+	// A project in safe mode runs no provider (errVcsSafeMode), so the window offers trust in
+	// place of working copies it could neither list nor change.
+	if p.safeMode() {
+		ui.Column(c).Fill().Background(a.colors.Editor).Children(func() {
+			a.safeModePanel(c, p, i18n.Shared(lang, "desktop.trust.vcsSafeMode"))
+		})
+		return
+	}
 	// The first paint of the window starts the detection, as the Run window starts its own:
 	// After only runs in the paint of a click, and nothing has to be clicked here.
 	if !s.detected && !s.detecting {
@@ -85,7 +93,7 @@ func (a *App) vcsWarning(c ui.C, message string) {
 // Core look for them again.
 func (a *App) vcsDetectAgain(c ui.C, p *project, message string, color gfx.Color) {
 	ui.Column(c).Fill().Center().Gap(8).PadX(shellContentPad).Children(func() {
-		ui.Paragraph(c, message, 4).TextCenter().Color(color)
+		ui.Paragraph(c, message, 4).FillWidth().TextCenter().Color(color)
 		if ui.Button(c, i18n.Shared(a.language(), "native.detectAgain2")).Outline().Disabled(p.vcs.detecting).Clicked() {
 			c.After(func() {
 				a.performed("vcs.detect", surfaceButton)
@@ -587,14 +595,14 @@ func (a *App) drawVcsRollbackDialog(c ui.C, p *project, t vcsTarget) {
 	paths := view.rollback
 	open, confirmed := true, false
 	spec := ui.ModalSpec{Width: 440, Description: i18n.Shared(lang, "native.localEditsToTheseFilesAreLost")}
-	closed := ui.ModalWith(c, &open, i18n.Shared(lang, "native.rollBackTheSelectedChanges"), spec, func() {
+	closed := ui.Modal(c, &open, i18n.Shared(lang, "native.rollBackTheSelectedChanges"), spec, func() {
 		ui.Column(c).FillWidth().Gap(4).Children(func() {
 			for index, path := range paths {
 				if index == vcsRollbackShown {
 					ui.Text(c, i18n.SharedFormat(lang, "native.arg1FilesSelected", map[string]string{"arg1": strconv.Itoa(len(paths))})).Muted()
 					break
 				}
-				ui.Text(c.Key(path), path).Color(a.colors.Text).Ellipsis()
+				ui.Text(c, path).Color(a.colors.Text).Ellipsis()
 			}
 		})
 	}, func() {

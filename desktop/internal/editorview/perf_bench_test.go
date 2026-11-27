@@ -10,6 +10,7 @@ package editorview
 
 import (
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 
@@ -140,12 +141,17 @@ type paintCase struct {
 var paintCases = []paintCase{
 	{name: "plain", kind: editorperf.Go},
 	{name: "go", kind: editorperf.Go, highlight: true},
+	{name: "indent-guides", kind: editorperf.Go, highlight: true, arrange: benchIndentGuides},
 	{name: "java", kind: editorperf.Java, highlight: true},
 	{name: "wrap", kind: editorperf.Go, highlight: true, layout: func(v *View) { v.SetWrap(true) }},
 	{name: "minimap", kind: editorperf.Go, highlight: true, layout: func(v *View) { v.SetMinimap(true) }},
 	{name: "longline", kind: editorperf.JSON, highlight: true, arrange: func(v *View) {
 		// The visible columns are in the middle of the line, where neither end of it helps.
 		v.scrollX = v.maxScrollX() / 2
+	}},
+	{name: "longline-wrap", kind: editorperf.JSON, highlight: true, layout: func(v *View) { v.SetWrap(true) }, arrange: func(v *View) {
+		// Repainting near the end must not walk the wrapped rows above the viewport.
+		v.moveTo(v.text.Len(), false)
 	}},
 	{name: "cjk", kind: editorperf.Markdown, highlight: true},
 	{name: "mixed", kind: editorperf.Mixed},
@@ -165,6 +171,8 @@ var paintCases = []paintCase{
 		}
 		v.SetMarkers(markers)
 	}},
+	// Provider colors on the brackets around the viewport, as a rainbow-bracket plugin sets them.
+	{name: "colors", kind: editorperf.Go, highlight: true, arrange: rainbowBrackets},
 	{name: "gutter", kind: editorperf.Go, highlight: true, arrange: func(v *View) {
 		// What the Git integration sets: a change bar over every few lines of the viewport and
 		// an annotation on each line, as a file full of blame has. The decorations and the
@@ -180,6 +188,77 @@ var paintCases = []paintCase{
 		v.SetGutterDecorations(decorations)
 		v.SetLineAnnotations(annotations)
 	}},
+}
+
+// benchColorDecorations is the most provider colors Core sends for a document
+// (MAX_MERGED_COLOR_DECORATIONS of its plugin-editor crate).
+const benchColorDecorations = 10_000
+
+// benchIndentGuides installs block geometry around the viewport before timing,
+// as the color worker does for a completed snapshot.
+func benchIndentGuides(v *View) {
+	v.SetPresentation(Presentation{IndentGuides: true})
+	mid := v.text.LineOf(v.caret)
+	first, last := max(mid-128, 0), min(mid+128, v.text.LineCount()-1)
+	var scopes []IndentGuideScope
+	var stack []int
+	for line := first; line <= last; line++ {
+		start := v.text.LineStart(line)
+		text, _ := v.text.Substring(start, v.lineEnd(line))
+		for column, r := range text {
+			switch r {
+			case '{':
+				stack = append(stack, len(scopes))
+				scopes = append(scopes, IndentGuideScope{Open: start + column})
+			case '}':
+				if len(stack) > 0 {
+					i := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					scopes[i].Close = start + column
+				}
+			}
+		}
+	}
+	v.SetIndentGuideScopes(PrepareIndentGuideScopes(v.TextSnapshot(), scopes))
+	if len(v.indentGuideScopes) == 0 {
+		panic("indent-guides fixture has no block scopes")
+	}
+}
+
+// rainbowBrackets colors the brackets of the lines around the caret's, the most that Core sends,
+// cycling three colors as a rainbow-bracket plugin does by nesting depth. Half of them are after
+// the caret, so an edit there moves as many colors as a rainbow in a file that size moves.
+func rainbowBrackets(v *View) {
+	palette := []string{"#C00050", "#0050C0", "#50A000"}
+	mid := v.text.LineOf(v.caret)
+	var before, after []ColorDecoration
+	bracketsOf := func(line int) []ColorDecoration {
+		var brackets []ColorDecoration
+		text, _ := v.text.Substring(v.text.LineStart(line), v.lineEnd(line))
+		for column, r := range text {
+			if strings.ContainsRune("(){}[]", r) {
+				color := palette[(line+column)%len(palette)]
+				brackets = append(brackets, ColorDecoration{StartLine: line, StartCharacter: column, EndLine: line, EndCharacter: column + 1, Light: color, Dark: color})
+			}
+		}
+		return brackets
+	}
+	for up, down := mid-1, mid; len(before)+len(after) < benchColorDecorations && (up >= 0 || down < v.text.LineCount()); up, down = up-1, down+1 {
+		if down < v.text.LineCount() {
+			after = append(after, bracketsOf(down)...)
+		}
+		if up >= 0 {
+			before = append(bracketsOf(up), before...)
+		}
+	}
+	decorations := append(before, after...)
+	if len(decorations) > benchColorDecorations {
+		trim := len(decorations) - benchColorDecorations
+		decorations = decorations[trim/2 : len(decorations)-(trim-trim/2)]
+	}
+	if !v.SetPreparedColorDecorations(PrepareColorDecorations(v.TextSnapshot(), decorations)) {
+		panic("colors were rejected")
+	}
 }
 
 // BenchmarkEditorViewPaint is one frame of a view that nothing has changed since its last, as the
@@ -222,6 +301,9 @@ var typeCases = []typeCase{
 	// A minified file with the minimap shown and soft wrap on: the minimap lays out the long line
 	// again on every edit unless the view's rows of the line are kept.
 	{name: "longline-wrap-minimap", kind: editorperf.JSON, layout: func(v *View) { v.SetWrap(true); v.SetMinimap(true) }},
+	// Provider colors on the brackets around the caret: each keystroke moves the colors after it,
+	// so that they stay on their brackets until the provider answers for the new text.
+	{name: "colors", kind: editorperf.Go, layout: rainbowBrackets},
 }
 
 // BenchmarkEditorViewType is a keystroke and the frame that shows it: a character typed at the end

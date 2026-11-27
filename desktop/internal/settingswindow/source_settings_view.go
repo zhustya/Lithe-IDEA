@@ -335,6 +335,14 @@ func (w *window) sourceSettingsPanel(c ui.C, p *sourceSettingsForm) {
 // sourceNavWidth is the width of the module list beside a sidebar form.
 const sourceNavWidth = 168
 
+// settingsListMinHeight is the least height of a source form's rows: they are the entries of
+// a tool's own configuration, which has no upper bound, so they scroll by themselves beside
+// the module tree. A window too short to give them that scrolls the page instead of squeezing
+// them. It still fits whole under an installed plugin's header and tabs in the smallest
+// window. A plugin's own declared settings are capped by Core and are not a list; they are
+// declared whole and scroll with the page.
+const settingsListMinHeight = 160
+
 func (p *sourceSettingsForm) navNode(i int) ui.TreeNode {
 	if i < 0 || i >= len(p.nav) {
 		return ui.TreeNode{}
@@ -527,7 +535,9 @@ func (w *window) sourceSettingsControl(c ui.C, p *sourceSettingsForm, source cor
 			return i18n.SharedFormat(language, "desktop.sourceSettings.inherit", map[string]string{"value": value})
 		}
 		if disabled {
-			w.readOnlyField(c, field.Title, label(control.selected))
+			// The choice stays readable and can be copied while the source takes no edit.
+			value := label(control.selected)
+			ui.TextField(c, &value, field.Title, "").ReadOnly(true).Grow(1).MinWidth(0).Height(30)
 			return
 		}
 		if ui.Select(c, &control.selected, control.choices, label).Width(190).Label(accessibleTitle).Changed() {
@@ -544,17 +554,15 @@ func (w *window) sourceSettingsControl(c ui.C, p *sourceSettingsForm, source cor
 		}
 	default:
 		list := field.Kind == "stringList" || field.Kind == "fileList"
-		if disabled && list {
-			w.readOnlyList(c, field.Title, control.input.Text)
-		} else if disabled {
-			w.readOnlyField(c, field.Title, control.input.Text)
-		} else if list {
-			if ui.TextArea(c, &control.input.Text, field.Title, "").FillWidth().Height(100).Changed() {
+		// A source that takes no edit keeps the value in the same field, read-only, so it
+		// can still be selected and copied.
+		if list {
+			if ui.TextArea(c, &control.input.Text, field.Title, "").FillWidth().Height(100).ReadOnly(disabled).Changed() {
 				control.input.Inherit = false
 				p.changed(source.ID, field.ID)
 			}
 		} else {
-			if ui.TextField(c, &control.input.Text, field.Title, "").FillWidth().Height(30).Changed() {
+			if ui.TextField(c, &control.input.Text, field.Title, "").FillWidth().Height(30).ReadOnly(disabled).Changed() {
 				control.input.Inherit = false
 				p.changed(source.ID, field.ID)
 			}

@@ -20,12 +20,13 @@ import (
 // Progress is written by the worker and read by the status bar; identity and
 // cancellation remain protected by pluginServerMu.
 type pluginServerPreparation struct {
-	project   *project
-	cancel    context.CancelFunc
-	progress  atomic.Pointer[pluginruntime.Progress]
-	cancelled atomic.Bool
-	pluginID  string
-	revision  uint64
+	project              *project
+	cancel               context.CancelFunc
+	progress             atomic.Pointer[pluginruntime.Progress]
+	cancelled            atomic.Bool
+	pluginID             string
+	revision             uint64
+	retryWithoutProvider bool
 }
 
 func (p *pluginServerPreparation) stop() {
@@ -52,6 +53,10 @@ type failedPluginServer struct {
 	message    string
 	logs       []lspLogLine
 	logsAdded  uint64
+	// untrusted is set when Core planned no server because the project is in safe mode and the
+	// server may run the project's code (#2208). It is no failure: the status bar says safe
+	// mode, and trusting the project starts the server (applyProjectTrust).
+	untrusted bool
 }
 
 func (f *failedPluginServer) displayID() string {
@@ -182,7 +187,22 @@ func (s *pluginServer) endBuild() {
 // A language nothing serves is the ordinary case for most files, so a missing
 // provider is not an error and nothing is logged for it.
 func (a *App) startPluginServer(languageID string) {
+	a.requestPluginServer(languageID, false)
+}
+
+func (a *App) languageServerStarting(languageID string) bool {
+	a.pluginServerMu.Lock()
+	defer a.pluginServerMu.Unlock()
+	return a.pluginServerStarting[languageID]
+}
+
+func (a *App) requestPluginServer(languageID string, providersChanged bool) {
 	if a.plugins == nil || languageID == "" {
+		return
+	}
+	if a.project != nil && a.project.remote != nil {
+		// log-exempt: 远程工作区的语言服务器要在主机上运行，现在还不支持；在本机启动只会读到空的占位文件夹，
+		// 信任远程文件夹后也不在本机运行任何项目代码。
 		return
 	}
 	a.pluginServerMu.Lock()
@@ -197,7 +217,11 @@ func (a *App) startPluginServer(languageID string) {
 	}
 	if a.pluginServerStarting[languageID] {
 		// Opening several files of one language at once must not launch several
-		// servers; the first start answers for all of them.
+		// servers. A registry change can arrive after this start read the
+		// old registry, so repeat selection if it returns without a provider.
+		if preparation := a.pluginServerPreparations[languageID]; providersChanged && preparation != nil {
+			preparation.retryWithoutProvider = true
+		}
 		a.pluginServerMu.Unlock()
 		return
 	}
@@ -259,6 +283,7 @@ func (a *App) finishPluginServerPreparation(preparation *pluginServerPreparation
 		owner = session.PluginID
 	}
 	changed := a.pluginServerChanges[owner] > preparation.revision
+	retryWithoutProvider := preparation.retryWithoutProvider
 	if current {
 		delete(a.pluginServerPreparations, languageID)
 	}
@@ -270,6 +295,7 @@ func (a *App) finishPluginServerPreparation(preparation *pluginServerPreparation
 			a.pluginServerMu.Lock()
 			delete(a.pluginServerStarting, languageID)
 			a.pluginServerMu.Unlock()
+			a.resumeStartingCompletion(preparation.project, languageID)
 		}
 		return
 	}
@@ -280,6 +306,12 @@ func (a *App) finishPluginServerPreparation(preparation *pluginServerPreparation
 		session, err = nil, context.Canceled
 	}
 	a.finishPluginServerStart(preparation.project, languageID, pluginID, version, session, err)
+	if retryWithoutProvider && session == nil && err == nil && a.project == preparation.project {
+		a.startPluginServer(languageID)
+	}
+	if session == nil {
+		a.resumeStartingCompletion(preparation.project, languageID)
+	}
 }
 
 // finishPluginServerStart takes the started session back on the window thread and
@@ -295,6 +327,16 @@ func (a *App) finishPluginServerStart(p *project, languageID, failedPluginID, fa
 		}
 		if errors.Is(err, context.Canceled) {
 			a.recordPluginServerFailure(p, languageID, failedPluginID, failedVersion, errors.New(i18n.Shared(a.language(), "desktop.lsp.preparationCancelled")), nil, 0)
+			return
+		}
+		if core.IsLaunchUntrustedWorkspace(err) {
+			if p.trust.allowed() {
+				// The project was trusted while Core planned this start: plan it again.
+				a.startPluginServer(languageID)
+				return
+			}
+			a.backgroundFailed("plugin_server_safe_mode", err)
+			a.recordPluginServerSafeMode(p, languageID, failedPluginID, failedVersion)
 			return
 		}
 		a.operationFailed("plugin_server_start", err)
@@ -350,7 +392,14 @@ func (a *App) finishPluginServerStart(p *project, languageID, failedPluginID, fa
 	// A restarted server has to republish everything: keeping the previous
 	// process's diagnostics would show problems the new one may already have fixed.
 	a.clearPluginDiagnostics(session.PluginID)
+	// A manual completion waiting for discovery predates the session being replaced.
+	waiting := a.semantics.startingCompletion
 	a.releasePluginDocuments(session.PluginID)
+	if waiting != nil {
+		a.semantics.startingCompletion = waiting
+		a.semantics.project = waiting.project
+		a.semantics.documentID = waiting.documentID
+	}
 	a.openDocumentsForPlugin(p, server, languageID)
 	a.servePluginServer(server, ctx)
 }
@@ -618,6 +667,9 @@ func (a *App) pluginBackendRequest() pluginservice.BackendRequest {
 		// goroutine; a map here would not fit lsp.startServer's string field.
 		request.WorkingDirectory = a.project.root
 		request.Context = a.project.pluginContext
+		// In safe mode Core plans only a server that declares it runs no project code; the
+		// others wait for trust (finishPluginServerStart).
+		request.ProjectCodeAllowed = a.project.trust.allowed()
 	}
 	return request
 }
@@ -674,6 +726,32 @@ func (a *App) recordPluginServerFailure(p *project, languageID, pluginID, versio
 		message:    reason,
 		logs:       copiedLogs,
 		logsAdded:  logsAdded,
+	}
+	a.pluginServerMu.Unlock()
+	a.invalidator.Invalidate()
+}
+
+// recordPluginServerSafeMode records that Core planned no server for languageID because the
+// project is in safe mode and the server may run the project's code. The status bar, its menu
+// and the LSP log say so and offer to trust the project, which starts the server.
+func (a *App) recordPluginServerSafeMode(p *project, languageID, pluginID, version string) {
+	if a.project != p || languageID == "" {
+		return
+	}
+	message := i18n.Shared(a.language(), "desktop.trust.lspSafeMode")
+	a.pluginServerMu.Lock()
+	if a.pluginServerFailed == nil {
+		a.pluginServerFailed = make(map[string]*failedPluginServer)
+	}
+	a.pluginServerFailed[languageID] = &failedPluginServer{
+		pluginID:   pluginID,
+		languageID: languageID,
+		version:    version,
+		project:    p,
+		message:    message,
+		logs:       []lspLogLine{{level: "INFO", text: cutLogLine("[INFO] " + message), tag: len("[INFO]")}},
+		logsAdded:  1,
+		untrusted:  true,
 	}
 	a.pluginServerMu.Unlock()
 	a.invalidator.Invalidate()

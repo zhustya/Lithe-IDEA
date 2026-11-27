@@ -257,14 +257,14 @@ func (a *App) editorFindBar(c ui.C, p *project, d *document) {
 	}
 	a.refreshEditorFind(p, d)
 
-	ui.Column(c.KeyInt(d.id).Part("find")).FillWidth().Shrink(0).PadX(8).PadY(5).Gap(4).Background(a.colors.Panel).Children(func() {
+	ui.Column(c.Part("find")).FillWidth().Shrink(0).PadX(8).PadY(5).Gap(4).Background(a.colors.Panel).Children(func() {
 		ui.Row(c).FillWidth().Items(ui.Center).Gap(5).Children(func() {
-			queryID := ui.ID(c.KeyInt(d.id).Part("find-query"))
+			queryID := ui.ID(c.Part("find-query"))
 			if f.focus {
 				c.Canvas().RequestFocus(queryID)
 				f.focus = false
 			}
-			ui.TextFieldID(c, queryID, &f.query, i18n.Shared(a.language(), "desktop.editorFind.find"), i18n.Shared(a.language(), "desktop.editorFind.find")).Icon(icons.Search).Grow(1).MinWidth(70).OnKey(func(event gfx.KeyEvent) gfx.EventResult {
+			ui.TextField(c, &f.query, i18n.Shared(a.language(), "desktop.editorFind.find"), i18n.Shared(a.language(), "desktop.editorFind.find"), ui.WithID(queryID)).Icon(icons.Search).Grow(1).MinWidth(70).OnKey(func(event gfx.KeyEvent) gfx.EventResult {
 				if event.Release {
 					return gfx.EventResult{}
 				}

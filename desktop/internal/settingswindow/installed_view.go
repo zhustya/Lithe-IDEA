@@ -1,23 +1,30 @@
 package settingswindow
 
 import (
+	"bytes"
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/editor/rope"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/editor/syntax"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/icons"
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
+	"github.com/vivaui/viva/ui/textview"
 )
 
 // The Installed tab of the plugin page, laid out as the macOS client's is: a search with
 // filter chips over the installed plugins, the enabled ones before the disabled ones, beside
-// the chosen plugin's header, its notices and five tabs. What it shows comes from the
-// owner's InstalledPlugins, which answers from memory; the marketplace index the page reads
-// adds the updates, descriptions and repositories.
+// the chosen plugin's header, its notices and six tabs. What it shows comes from the owner's
+// InstalledPlugins, which answers from memory; the marketplace index the page reads adds the
+// updates, descriptions and repositories, and the repository's releases the changelog
+// (installed_changelog.go).
 
 // installedState is the Installed tab's own state. Only the window thread uses it.
 type installedState struct {
@@ -36,6 +43,15 @@ type installedState struct {
 	bound   bool
 	// keys are the list keys the plugins have had, by plugin ID; see rowKey.
 	keys map[string]int
+	// programsOpen are the program declarations the Permissions & Programs tab shows in
+	// full, by programKey, and programTexts the colored texts they are shown in: one is made
+	// the first time its declaration is shown and dropped when the declaration closes.
+	programsOpen map[string]bool
+	programTexts map[string]*programText
+	// programTheme colors the declarations as the editor colors JSON, in the look
+	// programThemeDark names; see declarationTheme.
+	programTheme     *syntax.Theme
+	programThemeDark bool
 	// uninstallOpen says the confirmation of an uninstall is shown, for the plugin
 	// uninstallID named uninstallName. Both tabs ask through it.
 	uninstallOpen bool
@@ -99,6 +115,7 @@ const (
 	installedSettings
 	installedPermissions
 	installedVersions
+	installedChangelog
 	installedTabCount
 )
 
@@ -113,6 +130,8 @@ func installedTabTitle(language i18n.Language, tab int) string {
 		return i18n.Shared(language, "native.permissionsPrograms")
 	case installedVersions:
 		return i18n.Shared(language, "native.versionsSource")
+	case installedChangelog:
+		return i18n.Shared(language, "native.updateLog")
 	}
 	return i18n.Shared(language, "native.overview")
 }
@@ -352,7 +371,7 @@ func (w *window) installedChip(c ui.C, language i18n.Language, filter int) {
 		chip = chip.Stroke(1, w.pal.border).Hover(ui.Look{}.Background(w.pal.hover))
 	}
 	chip.Children(func() {
-		ui.Text(k, title).FontSize(11).Weight(weight).Color(w.pal.text)
+		ui.Text(c, title).FontSize(11).Weight(weight).Color(w.pal.text)
 	})
 	if chip.Clicked() {
 		s.filter = filter
@@ -379,8 +398,8 @@ func (w *window) installedSlashMenu(c ui.C, language i18n.Language) {
 				HitWith(ui.ID(k), title, gfx.HitOptions{Role: gfx.RoleMenuItem, Cursor: gfx.PointerCursorHand}).
 				Hover(ui.Look{}.Background(w.pal.hover))
 			option.Children(func() {
-				ui.Text(k, "/"+token).Mono().FontSize(12).Color(w.pal.text).Width(92).Shrink(0)
-				ui.Text(k, title).FontSize(11).Color(w.pal.muted).Ellipsis()
+				ui.Text(c, "/"+token).Mono().FontSize(12).Color(w.pal.text).Width(92).Shrink(0)
+				ui.Text(c, title).FontSize(11).Color(w.pal.muted).Ellipsis()
 			})
 			if option.Clicked() {
 				s.filter, s.query = filter, ""
@@ -431,7 +450,7 @@ func (w *window) installedList(c ui.C, language i18n.Language, facts []PluginFac
 				available := i18n.Shared(language, "native.updateAvailable.variant2")
 				ui.Row(k).Size(16, 16).Shrink(0).Radius(8).Background(w.pal.accent).Center().
 					HitWith(ui.ID(k), available, gfx.HitOptions{Role: gfx.RoleStatus}).Tooltip(available).Children(func() {
-					ui.Icon(k, icons.ArrowUp).Size(10, 10).Color(w.pal.white)
+					ui.Icon(c, icons.ArrowUp).Size(10, 10).Color(w.pal.white)
 				})
 			}
 			w.enabledMark(row.C, w.pluginState(fact.ID).Enabled)
@@ -497,12 +516,14 @@ func (w *window) installedDetail(c ui.C, language i18n.Language, fact PluginFact
 					if fact.Settings == 0 {
 						ui.Wrap(c, i18n.Shared(language, "desktop.pluginSettings.empty")).FontSize(12).Color(w.pal.muted)
 					} else {
-						w.pluginSettingsPanel(c, fact.ID)
+						w.pluginSettingsPanel(c, fact.ID, true)
 					}
 				case installedPermissions:
 					w.installedPermissions(c, language, fact)
 				case installedVersions:
 					w.installedVersions(c, language, fact)
+				case installedChangelog:
+					w.installedChangelog(c, language, fact)
 				default:
 					w.installedOverview(c, language, fact)
 				}
@@ -611,7 +632,7 @@ func (w *window) uninstallModal(c ui.C, language i18n.Language) {
 		return
 	}
 	title := i18n.SharedFormat(language, "native.uninstall", map[string]string{"arg1": s.uninstallName})
-	ui.ModalWith(c.Part("uninstall"), &s.uninstallOpen, title, ui.ModalSpec{Width: 400}, nil, func() {
+	ui.Modal(c.Part("uninstall"), &s.uninstallOpen, title, ui.ModalSpec{Width: 400}, nil, func() {
 		if ui.Button(c, i18n.Shared(language, "ui.cancel")).Outline().Clicked() {
 			s.uninstallOpen = false
 		}
@@ -650,8 +671,13 @@ func (w *window) installedTabs(c ui.C, language i18n.Language, fact PluginFacts)
 		installedSettings:    fact.Settings,
 		installedPermissions: len(fact.Permissions) + len(fact.Programs),
 	}
-	ui.Row(c).FillWidth().Shrink(0).PadX(22).Gap(18).Items(ui.End).Children(func() {
+	// The tabs wrap onto a second line where the detail is too narrow for all of them, as in
+	// English at the window's least width, so none is cut off.
+	ui.Flow(c).FillWidth().Shrink(0).PadX(22).Gap(18).LineGap(8).Items(ui.End).Children(func() {
 		for tab := range installedTabCount {
+			if tab == installedChangelog && !w.changelog.available() {
+				continue
+			}
 			k := c.KeyInt(tab)
 			title := installedTabTitle(language, tab)
 			chosen := s.tab == tab
@@ -659,13 +685,13 @@ func (w *window) installedTabs(c ui.C, language i18n.Language, fact PluginFacts)
 				HitWith(ui.ID(k), title, gfx.HitOptions{Role: gfx.RoleTab, Cursor: gfx.PointerCursorHand, Selected: chosen})
 			button.Children(func() {
 				ui.Row(k).Gap(5).Items(ui.Center).Children(func() {
-					text := ui.Text(k, title).FontSize(13).Color(w.pal.muted)
+					text := ui.Text(c, title).FontSize(13).Color(w.pal.muted)
 					if chosen {
 						text.Weight(gfx.WeightSemibold).Color(w.pal.text)
 					}
 					if counts[tab] > 0 {
 						ui.Row(k).PadX(5).PadY(1).Radius(100).Background(w.pal.selectionIdle).Children(func() {
-							ui.Text(k, strconv.Itoa(counts[tab])).FontSize(10).Weight(gfx.WeightMedium).Color(w.pal.muted)
+							ui.Text(c, strconv.Itoa(counts[tab])).FontSize(10).Weight(gfx.WeightMedium).Color(w.pal.muted)
 						})
 					}
 				})
@@ -681,13 +707,46 @@ func (w *window) installedTabs(c ui.C, language i18n.Language, fact PluginFacts)
 	})
 }
 
+// installedFieldLine is the least height of a detail grid's line: the ⓘ glyph's, so a line
+// that ends in one is as tall as a line of text and the grid keeps one rhythm.
+const installedFieldLine = 18
+
+// installedLabelColumn is the width of a detail grid's labels, where the values start. It
+// holds the widest label with an ⓘ after it, "Content SHA-256", which the system font draws
+// about 102 points wide, with room to spare for the ⓘ's gap and glyph.
+const installedLabelColumn = 136
+
+// installedLinkInset is the side padding Viva keeps around a link button's words, the same
+// as a regular button's (components.Button's geometry). A link that is a field's value is
+// pulled left by it so its words start where the plain values above and below start.
+const installedLinkInset = 10
+
 // installedField is one line of a detail's grid: a label in the secondary color beside
-// what body declares.
+// what body declares. The label and the value stand on one text baseline, whatever their
+// fonts, and a value that wraps keeps the label beside its first line.
 func (w *window) installedField(c ui.C, label string, body func()) {
-	ui.Row(c).FillWidth().Gap(16).Items(ui.Start).Children(func() {
-		ui.Text(c, label).Width(120).Shrink(0).FontSize(12).Color(w.pal.muted)
-		ui.Row(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Items(ui.Center).Children(body)
+	w.installedFieldHelp(c, label, "", body)
+}
+
+// installedFieldHelp is installedField whose label is followed, inside the label's column,
+// by an ⓘ whose tip is help, so a note on the field neither takes a line of its own nor
+// pushes the value aside. An empty help leaves the label alone.
+func (w *window) installedFieldHelp(c ui.C, label, help string, body func()) {
+	ui.Row(c).FillWidth().MinHeight(installedFieldLine).Gap(16).Items(ui.Baseline).Children(func() {
+		ui.Row(c).Width(installedLabelColumn).Shrink(0).Gap(4).Items(ui.Baseline).Children(func() {
+			ui.Text(c, label).FontSize(12).Color(w.pal.muted).Shrink(1).MinWidth(0)
+			if help != "" {
+				w.infoButton(c, help)
+			}
+		})
+		ui.Row(c).Grow(1).Shrink(1).MinWidth(0).Gap(8).Items(ui.Baseline).Children(body)
 	})
+}
+
+// installedLink is a field's value that opens something: link words that line up with the
+// plain values of the other lines and keep the line as tall as theirs.
+func (w *window) installedLink(c ui.C, label string) ui.Box {
+	return ui.Button(c, label).Link().Height(installedFieldLine).MarginLeft(-installedLinkInset)
 }
 
 // installedValue is a field's plain value.
@@ -727,7 +786,7 @@ func (w *window) installedOverview(c ui.C, language i18n.Language, fact PluginFa
 				ui.Text(c, i18n.SharedFormat(language, "native.installedFrom", map[string]string{"arg1": i18n.Shared(language, "native.marketplace")})).
 					FontSize(12).Color(w.pal.text).Shrink(1).MinWidth(0).Ellipsis()
 				if listed && webURL(entry.Repository) && w.ctrl.opts.OpenURL != nil {
-					if ui.Button(c, i18n.Shared(language, "native.sourceRepository")).Link().Tooltip(entry.Repository).Clicked() {
+					if w.installedLink(c, i18n.Shared(language, "native.sourceRepository")).Tooltip(entry.Repository).Clicked() {
 						w.ctrl.opts.OpenURL(entry.Repository)
 					}
 				}
@@ -741,7 +800,7 @@ func (w *window) installedOverview(c ui.C, language i18n.Language, fact PluginFa
 				return
 			}
 			ui.Text(c, strconv.Itoa(fact.Settings)).FontSize(12).Color(w.pal.text).Shrink(0)
-			if ui.Button(c, i18n.Shared(language, "native.view")).Link().Clicked() {
+			if w.installedLink(c, i18n.Shared(language, "native.view")).Clicked() {
 				w.installed.tab = installedSettings
 			}
 		})
@@ -783,9 +842,9 @@ func (w *window) configureInSettings(c ui.C, language i18n.Language, fact Plugin
 				if entry.page.Kind == "buildSystem" {
 					icon = icons.Play
 				}
-				ui.Icon(k, icon).Size(14, 14).Color(w.pal.muted).Shrink(0)
+				ui.Icon(c, icon).Size(14, 14).Color(w.pal.muted).Shrink(0)
 				if entry.subjects != "" {
-					ui.Text(k, entry.subjects).FontSize(12).Color(w.pal.muted).Shrink(1).MinWidth(0).Ellipsis()
+					ui.Text(c, entry.subjects).FontSize(12).Color(w.pal.muted).Shrink(1).MinWidth(0).Ellipsis()
 				}
 				if ui.Button(k, entry.page.Title).Link().Clicked() {
 					key, pluginID := entry.page.Key, fact.ID
@@ -858,30 +917,30 @@ func (w *window) installedFeatures(c ui.C, language i18n.Language, fact PluginFa
 	var missing []MissingCommand
 	if enabled {
 		missing = w.commands.want(fact.ID)
-		w.commandMissingBanner(c.Part("command-missing"), language, fact, unmatchedMissing(missing, fact.Capabilities))
+		w.commandMissingBanner(c, language, fact, unmatchedMissing(missing, fact.Capabilities))
 	}
 	ui.Grid(c, 220).FillWidth().Gap(10).Children(func() {
 		for index, capability := range fact.Capabilities {
 			k := c.KeyInt(index)
 			ui.Column(k).FillWidth().Gap(5).Pad(12).Radius(8).Background(w.pal.card).Stroke(1, w.pal.line).Children(func() {
-				ui.Text(k, capabilityKindTitle(language, capability.Kind)).FontSize(11).Weight(gfx.WeightMedium).Color(w.pal.muted)
+				ui.Text(c, capabilityKindTitle(language, capability.Kind)).FontSize(11).Weight(gfx.WeightMedium).Color(w.pal.muted)
 				title := capability.Title
 				if title == "" {
 					title = capability.ID
 				}
-				ui.Text(k, title).FontSize(13).Color(w.pal.text).Ellipsis()
+				ui.Text(c, title).FontSize(13).Color(w.pal.text).Ellipsis()
 				if detail := capabilityDetail(language, capability); detail != "" {
-					ui.Wrap(k, detail).FontSize(11).Color(w.pal.muted)
+					ui.Wrap(c, detail).FontSize(11).Color(w.pal.muted)
 				}
 				ui.Row(k).FillWidth().Gap(8).Items(ui.Center).Children(func() {
 					if entry, ok := missingFor(missing, capability); enabled && ok {
 						w.commandMissingStatus(k, language, fact, entry)
 					} else if enabled {
-						ui.Text(k, i18n.Shared(language, "native.available")).FontSize(11).Color(w.pal.success)
+						ui.Text(c, i18n.Shared(language, "native.available")).FontSize(11).Color(w.pal.success)
 					} else {
-						ui.Text(k, i18n.Shared(language, "native.pluginDisabled")).FontSize(11).Color(w.pal.muted)
+						ui.Text(c, i18n.Shared(language, "native.pluginDisabled")).FontSize(11).Color(w.pal.muted)
 					}
-					ui.Spacer(k)
+					ui.Spacer(c)
 					if key := capabilityPage(capability); enabled && key != "" && w.dynamic.selected(key) != nil {
 						if ui.Button(k, i18n.Shared(language, "native.configure")+" →").Link().XSmall().Clicked() {
 							pluginID := fact.ID
@@ -925,39 +984,117 @@ func capabilityDetail(language i18n.Language, capability PluginCapability) strin
 	return ""
 }
 
-// permissionDescription says what a permission lets the plugin do, or "" for a permission
-// that shows only its name.
+// permissionDescription says what a permission lets the plugin do. Every permission of the
+// plugin contract has one; a permission from a newer contract that this host does not know
+// returns "" and shows only its name.
 func permissionDescription(language i18n.Language, permission string) string {
 	switch permission {
 	case "languageServer.launch":
 		return i18n.Shared(language, "native.startALanguageServerWhenYouOpenFilesOfItsLanguage")
-
-	case "process.build":
-		return i18n.Shared(language, "desktop.marketplace.permissionBuild")
-	case "project.generate":
-		return i18n.Shared(language, "desktop.marketplace.permissionGenerate")
 	case "backend.launch":
 		return i18n.Shared(language, "desktop.marketplace.permissionBackend")
-	case "debug.launch":
-		return i18n.Shared(language, "desktop.marketplace.permissionDebug")
+	case "process.build":
+		return i18n.Shared(language, "desktop.marketplace.permissionBuild")
 	case "process.run":
 		return i18n.Shared(language, "native.runYourFiles")
-	case "ui.contribute":
-		return i18n.Shared(language, "native.addToolWindowsAndCommandsToTheWorkbench")
-	case "ui.web":
-		return i18n.Shared(language, "native.showItsOwnPageInAToolWindow")
 	case "process.test":
 		return i18n.Shared(language, "native.runYourTests")
+	case "process.vcs":
+		return i18n.Shared(language, "desktop.marketplace.permissionVcs")
+	case "project.generate":
+		return i18n.Shared(language, "desktop.marketplace.permissionGenerate")
+	case "debug.launch":
+		return i18n.Shared(language, "desktop.marketplace.permissionDebug")
+	case "debug.attach":
+		return i18n.Shared(language, "desktop.marketplace.permissionDebugAttach")
+	case "debug.start":
+		return i18n.Shared(language, "desktop.marketplace.permissionDebugStart")
+	case "run.start":
+		return i18n.Shared(language, "desktop.marketplace.permissionRunStart")
+	case "terminal.create":
+		return i18n.Shared(language, "desktop.marketplace.permissionTerminalCreate")
 	case "commands.install":
 		return i18n.Shared(language, "desktop.marketplace.permissionCommandsInstall")
 	case "runtimes.install":
 		return i18n.Shared(language, "desktop.marketplace.permissionRuntimesInstall")
+	case "toolchains.provide":
+		return i18n.Shared(language, "desktop.marketplace.permissionToolchainsProvide")
+	case "ui.contribute":
+		return i18n.Shared(language, "native.addToolWindowsAndCommandsToTheWorkbench")
+	case "ui.web":
+		return i18n.Shared(language, "native.showItsOwnPageInAToolWindow")
+	case "window.messages":
+		return i18n.Shared(language, "desktop.marketplace.permissionWindowMessages")
+	case "browser.open":
+		return i18n.Shared(language, "desktop.marketplace.permissionBrowserOpen")
+	case "window.input":
+		return i18n.Shared(language, "desktop.marketplace.permissionWindowInput")
+	case "views.refresh":
+		return i18n.Shared(language, "desktop.marketplace.permissionViewsRefresh")
+	case "output.write":
+		return i18n.Shared(language, "desktop.marketplace.permissionOutputWrite")
+	case "window.progress":
+		return i18n.Shared(language, "desktop.marketplace.permissionWindowProgress")
+	case "statusBar.write":
+		return i18n.Shared(language, "desktop.marketplace.permissionStatusBarWrite")
+	case "clipboard.read":
+		return i18n.Shared(language, "desktop.marketplace.permissionClipboardRead")
+	case "clipboard.write":
+		return i18n.Shared(language, "desktop.marketplace.permissionClipboardWrite")
+	case "workspace.reveal":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceReveal")
+	case "network.request":
+		return i18n.Shared(language, "desktop.marketplace.permissionNetworkRequest")
+	case "preview.open":
+		return i18n.Shared(language, "desktop.marketplace.permissionPreviewOpen")
+	case "workspace.metadata":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceMetadata")
+	case "workspace.files.read":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceFilesRead")
+	case "workspace.files.write":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceFilesWrite")
+	case "workspace.files.watch":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceFilesWatch")
+	case "workspace.search":
+		return i18n.Shared(language, "desktop.marketplace.permissionWorkspaceSearch")
+	case "build.options.read":
+		return i18n.Shared(language, "desktop.marketplace.permissionBuildOptionsRead")
+	case "build.configuration.watch":
+		return i18n.Shared(language, "desktop.marketplace.permissionBuildConfigurationWatch")
+	case "documents.read":
+		return i18n.Shared(language, "desktop.marketplace.permissionDocumentsRead")
+	case "documents.save":
+		return i18n.Shared(language, "desktop.marketplace.permissionDocumentsSave")
+	case "documents.contentProvider":
+		return i18n.Shared(language, "desktop.marketplace.permissionDocumentsContentProvider")
+	case "editor.open":
+		return i18n.Shared(language, "desktop.marketplace.permissionEditorOpen")
+	case "editor.edit":
+		return i18n.Shared(language, "desktop.marketplace.permissionEditorEdit")
+	case "editor.actions":
+		return i18n.Shared(language, "desktop.marketplace.permissionEditorActions")
+	case "editor.providers":
+		return i18n.Shared(language, "desktop.marketplace.permissionEditorProviders")
+	case "languageServer.request":
+		return i18n.Shared(language, "desktop.marketplace.permissionLanguageServerRequest")
+	case "credentials.store":
+		return i18n.Shared(language, "desktop.marketplace.permissionCredentialsStore")
+	case "keymaps.provide":
+		return i18n.Shared(language, "desktop.marketplace.permissionKeymapsProvide")
+	case "keymaps.readSelectedSources":
+		return i18n.Shared(language, "desktop.marketplace.permissionKeymapsReadSelectedSources")
 	}
 	return ""
 }
 
-// installedPermissions is what the user approved: the permissions, then the programs the
-// plugin may run.
+// installedPermissionLine is the height of one line of a permission's description. Its
+// shield is centered in a box this tall, so it stays on the first line of a description that
+// wraps.
+const installedPermissionLine = 19
+
+// installedPermissions is what the user approved: the permissions, each one line of what it
+// lets the plugin do followed by its name in the contract, then the programs the plugin may
+// run, each one line that opens to its full declaration.
 func (w *window) installedPermissions(c ui.C, language i18n.Language, fact PluginFacts) {
 	ui.Column(c).FillWidth().Gap(4).Children(func() {
 		ui.Text(c, i18n.Shared(language, "native.permissions")).FontSize(13).Weight(gfx.WeightSemibold).Color(w.pal.text).PadBottom(4)
@@ -966,31 +1103,247 @@ func (w *window) installedPermissions(c ui.C, language i18n.Language, fact Plugi
 		}
 		for index, permission := range fact.Permissions {
 			k := c.KeyInt(index)
-			ui.Row(k).FillWidth().PadY(4).Gap(8).Items(ui.Start).Children(func() {
-				ui.Icon(k, icons.ShieldCheck).Size(14, 14).Color(w.pal.accent).Shrink(0)
-				ui.Column(k).Grow(1).Shrink(1).MinWidth(0).Gap(2).Children(func() {
+			ui.Row(k).FillWidth().PadY(3).Gap(8).Items(ui.Start).Children(func() {
+				ui.Row(k).Height(installedPermissionLine).Shrink(0).Items(ui.Center).Children(func() {
+					ui.Icon(c, icons.ShieldCheck).Size(14, 14).Color(w.pal.accent)
+				})
+				ui.Row(k).Grow(1).Shrink(1).MinWidth(0).Gap(8).Items(ui.Baseline).Children(func() {
 					if description := permissionDescription(language, permission); description != "" {
-						ui.Wrap(k, description).FontSize(12).Color(w.pal.text)
+						ui.Wrap(c, description).FontSize(12).LineHeight(installedPermissionLine).Color(w.pal.text).Shrink(1).MinWidth(0)
 					}
-					ui.Text(k, permission).Mono().FontSize(11).Color(w.pal.subtle)
+					ui.Text(c, permission).Mono().FontSize(11).Color(w.pal.subtle).Shrink(0)
 				})
 			})
 		}
-		ui.Text(c, i18n.Shared(language, "native.programsItCanRun")).FontSize(13).Weight(gfx.WeightSemibold).Color(w.pal.text).PadTop(14).PadBottom(4)
+		ui.Row(c).FillWidth().Gap(6).Items(ui.Center).PadTop(14).PadBottom(4).Children(func() {
+			ui.Text(c, i18n.Shared(language, "native.programsItCanRun")).FontSize(13).Weight(gfx.WeightSemibold).Color(w.pal.text)
+			if len(fact.Programs) != 0 {
+				w.infoButton(c, i18n.Shared(language, "desktop.marketplace.programsSettingsHelp"))
+			}
+		})
 		if len(fact.Programs) == 0 {
 			ui.Wrap(c, i18n.Shared(language, "native.startsNoPrograms")).FontSize(12).Color(w.pal.muted)
-		} else {
-			ui.Text(c, i18n.Shared(language, "native.fullProgramDeclaration")).FontSize(11).Color(w.pal.muted).PadBottom(2)
 		}
 		for index, program := range fact.Programs {
-			k := c.KeyInt(1000 + index)
-			ui.Row(k).FillWidth().Pad(8).Radius(6).Background(w.pal.card).Stroke(1, w.pal.line).Children(func() {
-				ui.Wrap(k, program).Mono().FontSize(11).Color(w.pal.text).Grow(1).Shrink(1).MinWidth(0)
+			w.installedProgram(c.KeyInt(1000+index), language, fact, program)
+		}
+	})
+}
+
+// programKey names one program declaration of one plugin in installedState.programsOpen.
+func programKey(fact PluginFacts, program string) string {
+	return fact.ID + "\x00" + program
+}
+
+// installedProgram is one program the plugin may run: a line that names it by its kind and
+// the words its declaration gives it, which opens and closes the declaration in full, and a
+// button that copies the declaration. The line's caret sits in the column of the permissions'
+// shields, so the two lists start at one edge.
+func (w *window) installedProgram(c ui.C, language i18n.Language, fact PluginFacts, program string) {
+	key := programKey(fact, program)
+	open := w.installed.programsOpen[key]
+	kind, detail := programSummary(program)
+	declaration := programDeclaration(program)
+	ui.Column(c).FillWidth().Gap(4).Children(func() {
+		ui.Row(c).FillWidth().Gap(4).Items(ui.Center).Children(func() {
+			disclose := ui.ButtonBase(c.Part("open"), strings.TrimSpace(kind+" "+detail)).Grow(1).Shrink(1).MinWidth(0).
+				MinHeight(installedFieldLine).PadX(4).PadY(3).MarginLeft(-4).Gap(8).Radius(6).Items(ui.Center).Justify(ui.Start).
+				Hover(ui.Look{}.Background(w.pal.hover)).Tooltip(i18n.Shared(language, "native.fullProgramDeclaration"))
+			if disclose.Clicked() {
+				if open {
+					delete(w.installed.programsOpen, key)
+					delete(w.installed.programTexts, key)
+				} else {
+					if w.installed.programsOpen == nil {
+						w.installed.programsOpen = map[string]bool{}
+					}
+					w.installed.programsOpen[key] = true
+				}
+			}
+			disclose.Children(func() {
+				caret := icons.ChevronRight
+				if open {
+					caret = icons.ChevronDown
+				}
+				ui.Row(c).Width(14).Shrink(0).Center().Children(func() {
+					ui.Icon(c, caret).Size(10, 10).Color(w.pal.muted)
+				})
+				if kind == "" {
+					ui.Text(c, program).Mono().FontSize(11).Color(w.pal.text).Shrink(1).MinWidth(0).Ellipsis()
+					return
+				}
+				ui.Text(c, kind).Mono().FontSize(11).Color(w.pal.text).Shrink(0)
+				if detail != "" {
+					ui.Text(c, detail).Mono().FontSize(11).Color(w.pal.subtle).Shrink(1).MinWidth(0).Ellipsis()
+				}
+			})
+			copyLabel := i18n.Shared(language, "native.copyJSON")
+			copyButton := ui.ButtonBase(c.Part("copy"), copyLabel).Size(20, 20).Shrink(0).Radius(6).Center().
+				Hover(ui.Look{}.Background(w.pal.hover)).Tooltip(copyLabel)
+			if copyButton.Clicked() {
+				if err := copyText(declaration); err != nil {
+					reportSettingsError(w.ctrl.opts, "settings_plugin_program_copy", err)
+				}
+			}
+			copyButton.Children(func() {
+				ui.Icon(c, icons.Copy).Size(11, 11).Color(w.pal.muted)
+			})
+		})
+		if open {
+			text := w.declarationText(key, declaration)
+			theme := w.declarationTheme()
+			ui.Column(c).FillWidth().MarginLeft(22).Pad(8).Radius(6).Background(w.pal.card).Stroke(1, w.pal.line).Children(func() {
+				// The lines never change for one text, so it wraps them again only when its
+				// width does.
+				text.view.Declare(c.Key("declaration"), textview.Spec{
+					Label:      i18n.Shared(language, "native.fullProgramDeclaration"),
+					Source:     text.lines,
+					Font:       gfx.TextStyle{Size: 11, Weight: gfx.WeightRegular, Mono: true, Color: w.pal.text},
+					LineHeight: 16,
+					Selection:  w.pal.highlight,
+					Wrap:       true,
+					Revision:   1,
+					Spans: func(n int, line string, dst []textview.Span) []textview.Span {
+						return text.spans(theme, w.pal.text, n, line, dst)
+					},
+					Copy: func(selected string) {
+						if err := copyText(selected); err != nil {
+							reportSettingsError(w.ctrl.opts, "settings_plugin_program_copy", err)
+						}
+					},
+				})
 			})
 		}
-		ui.Wrap(c, i18n.Shared(language, "native.settingValuesOnlyFillThePlacesTheProgramTemplatesReserveForThemSoChangingASetta1ef53141a")).
-			FontSize(11).Color(w.pal.subtle).PadTop(10)
 	})
+}
+
+// programText is an opened program declaration: its lines, the editor's JSON tokens of each,
+// and the read-only text that shows them, which can be selected and copied.
+type programText struct {
+	lines  textview.Strings
+	tokens [][]syntax.Token
+	view   textview.View
+}
+
+// declarationGrammar is the editor's JSON grammar, the one the declarations are colored with.
+// The grammars are built into Lithe, so making it reads no file; its patterns compile the
+// first time a declaration opens.
+var declarationGrammar = sync.OnceValue(func() *syntax.Syntax {
+	return syntax.NewRegistry().Syntax("json")
+})
+
+// declarationText is the text of the declaration of the program key names, made the first
+// time it is shown: a declaration is a few lines, read once through one highlighter so a
+// string that spans lines is colored as the editor colors it.
+func (w *window) declarationText(key, declaration string) *programText {
+	if text, ok := w.installed.programTexts[key]; ok {
+		return text
+	}
+	source := rope.FromString(declaration)
+	text := &programText{}
+	for i := 0; i < source.LineCount(); i++ {
+		text.lines = append(text.lines, source.Line(i))
+	}
+	text.tokens = make([][]syntax.Token, len(text.lines))
+	if grammar := declarationGrammar(); grammar != nil {
+		highlighter := syntax.NewHighlighter(grammar, source, syntax.HighlighterOptions{})
+		for i := range text.lines {
+			text.tokens[i] = highlighter.Line(nil, i)
+		}
+		highlighter.Close()
+	}
+	if w.installed.programTexts == nil {
+		w.installed.programTexts = map[string]*programText{}
+	}
+	w.installed.programTexts[key] = text
+	return text
+}
+
+// declarationTheme is the editor's Lithe scheme in the window's look, built again only when
+// the look changes.
+func (w *window) declarationTheme() *syntax.Theme {
+	s := &w.installed
+	if s.programTheme == nil || s.programThemeDark != w.dark {
+		options := syntax.ThemeOptions{Dark: w.dark, Scheme: syntax.SchemeLithe}
+		s.programTheme, s.programThemeDark = syntax.BuildTheme(options, syntax.DefaultPalette()), w.dark
+	}
+	return s.programTheme
+}
+
+// spans appends to dst the styled stretches of line n of the declaration, in theme's colors.
+// A token in the scheme's text color takes plain, the card's text color, as the hover's code
+// does, and one that is plain in every way is left out.
+func (t *programText) spans(theme *syntax.Theme, plain gfx.Color, n int, line string, dst []textview.Span) []textview.Span {
+	if n < 0 || n >= len(t.tokens) {
+		return dst
+	}
+	tokens, text := t.tokens[n], theme.Default().Foreground
+	for i, token := range tokens {
+		start, end := int(token.Start), len(line)
+		if i+1 < len(tokens) {
+			end = int(tokens[i+1].Start)
+		}
+		if start < 0 || start >= end || end > len(line) {
+			continue
+		}
+		style := theme.Style(token.Name)
+		if style.Foreground == text && style.Font == 0 {
+			continue
+		}
+		span := textview.Span{From: start, To: end, Color: plain}
+		if style.Foreground != text {
+			span.Color = gfx.RGB24(uint32(style.Foreground))
+		}
+		span.Bold, span.Italic = style.Font&syntax.Bold != 0, style.Font&syntax.Italic != 0
+		dst = append(dst, span)
+	}
+	return dst
+}
+
+// programSummary names a program declaration on one line: its kind, and the words its
+// declaration gives it at the top level (the language, the tool, the installer's or build
+// system's ID), in the order it gives them. A declaration that is not a JSON object with a
+// kind has no summary, and the caller shows it as it is.
+func programSummary(program string) (kind, detail string) {
+	decoder := json.NewDecoder(strings.NewReader(program))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return "", ""
+	}
+	var words []string
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return "", ""
+		}
+		name, _ := token.(string)
+		var value any
+		if err := decoder.Decode(&value); err != nil {
+			return "", ""
+		}
+		text, ok := value.(string)
+		if !ok || text == "" {
+			continue
+		}
+		if name == "kind" {
+			kind = text
+		} else {
+			words = append(words, text)
+		}
+	}
+	if kind == "" {
+		return "", ""
+	}
+	return kind, strings.Join(words, " · ")
+}
+
+// programDeclaration is a program declaration indented for reading, the form it is shown
+// and copied in; a declaration that is not JSON stays as it is.
+func programDeclaration(program string) string {
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, []byte(program), "", "  "); err != nil {
+		return program
+	}
+	return indented.String()
 }
 
 // installedVersions is the installed version, where updates come from and what the
@@ -1028,18 +1381,19 @@ func (w *window) installedVersions(c ui.C, language i18n.Language, fact PluginFa
 				w.installedValue(c, entry.Repository)
 				return
 			}
-			if ui.Button(c, repositoryName(entry.Repository)).Link().Tooltip(entry.Repository).Clicked() {
+			if w.installedLink(c, repositoryName(entry.Repository)).Tooltip(entry.Repository).Clicked() {
 				w.ctrl.opts.OpenURL(entry.Repository)
 			}
 		})
 		w.installedField(c, i18n.Shared(language, "native.localPackage"), mono(fact.Path))
 		w.installedField(c, i18n.Shared(language, "native.archiveSHA256"), mono(fact.ArchiveSHA256))
-		w.installedField(c, i18n.Shared(language, "native.contentSHA256"), func() {
-			ui.Column(c).Grow(1).Shrink(1).MinWidth(0).Gap(3).Children(func() {
-				mono(fact.ContentDigest)()
-				ui.Wrap(c, i18n.Shared(language, "native.checkedAgainEveryTimeLitheLoadsThePlugin")).FontSize(11).Color(w.pal.subtle)
-			})
-		})
+		// The ⓘ that says when the digest is checked follows the label: after the digest it would
+		// sit at the far end of a line the digest fills, away from what it explains.
+		checked := ""
+		if fact.ContentDigest != "" {
+			checked = i18n.Shared(language, "native.checkedAgainEveryTimeLitheLoadsThePlugin")
+		}
+		w.installedFieldHelp(c, i18n.Shared(language, "native.contentSHA256"), checked, mono(fact.ContentDigest))
 		w.installedField(c, i18n.Shared(language, "native.pluginID"), mono(fact.ID))
 	})
 }

@@ -119,6 +119,7 @@ type TitleMessages struct {
 
 // ToolMessages name the tool windows on the stripes.
 type ToolMessages struct {
+	Output        string
 	Project       string
 	Commit        string
 	Structure     string
@@ -134,6 +135,8 @@ type ToolMessages struct {
 	Debug         string
 	Notifications string
 	Background    string
+	// Ports names the tool window of a remote workspace that lists the host's ports and forwards.
+	Ports string
 	// ToolWindows names the stripe button that lists the stripe buttons the user hid.
 	ToolWindows string
 	// DragHint tells assistive technology that a toolbar item can be dragged elsewhere.
@@ -580,10 +583,13 @@ type SettingsMessages struct {
 	ProcessTermination string
 	Plugins            string
 	VersionControl     string
+	Git                string
 	Build              string
 	Toolchains         string
 	Debuggers          string
 	Console            string
+	TrustedLocations   string
+	RemoteWorkspace    string
 	Languages          string
 	Tools              string
 	SearchPage         string
@@ -746,7 +752,7 @@ type LogMessages struct {
 	RedactedNote   string
 	SourceLine     func(line int) string
 	NoOperation    string
-	// Operation heads the call chain, for example "Op c0ffee · 4 records · 12 ms".
+	// Operation heads the call chain, for example "Op c0ffee · Records: 4 · 12 ms".
 	Operation func(op string, count int, duration string) string
 
 	// The status bar.

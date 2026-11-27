@@ -257,6 +257,9 @@ func (w *window) config() app.Config {
 		Background:  &w.background,
 		Invalidator: &w.inv,
 		BarStyle:    uistyle.Bars,
+		// Messages, fields and sidebar entries cut short with an ellipsis show their whole
+		// value when the pointer rests on them.
+		EllipsisTooltips: true,
 	})
 	config := ui.Configure(w.page, app.Config{
 		Title:          w.ctrl.text().Logs.Logs,
@@ -371,7 +374,7 @@ func (w *window) title(c ui.C) {
 	if w.model.directory != "" {
 		title = abbreviateHome(filepath.Join(w.model.directory, w.model.currentSessionPath))
 	}
-	leading, trailing := app.TitlebarInsets()
+	leading, trailing := c.TitlebarInsets()
 	ui.Stack(c).FillWidth().Height(titleHeight).Shrink(0).Background(w.pal.bg3).MovesWindow().Children(func() {
 		// The system's window buttons sit at the leading end, so the title keeps clear of
 		// them on that side and is centered in what is left.
@@ -446,11 +449,13 @@ func (w *window) loadError(c ui.C) {
 
 // body is the channel list beside the table, with the details under the table. ⌘C copies
 // the selected records while the keyboard focus is anywhere in it; in the toolbar it is the
-// filter field's.
+// filter field's. A channel name the list cuts short shows in full to its right, over the
+// table.
 func (w *window) body(c ui.C) {
 	body := ui.Row(c).FillWidth().Grow(1).Shrink(1).MinHeight(0)
 	body.Children(func() {
-		ui.Column(c).Width(sidebarWidth).FillHeight().Shrink(0).Background(w.pal.bg2).Clip().PadSides(8, 0, 0, 0).Children(func() {
+		ui.Column(c).Width(sidebarWidth).FillHeight().Shrink(0).Background(w.pal.bg2).Clip().PadSides(8, 0, 0, 0).
+			EllipsisTooltipOn(ui.TooltipRight).Children(func() {
 			w.sidebarPanel(c)
 		})
 		ui.Row(c).Width(1).FillHeight().Shrink(0).Background(w.pal.line)
@@ -532,7 +537,7 @@ func (w *window) status(c ui.C) {
 // name of a filter to save.
 func (w *window) dialogs(c ui.C) {
 	logs := &w.text.Logs
-	ui.ModalWith(c, &w.clearOpen, logs.ClearTitle, ui.ModalSpec{Description: logs.ClearMessage, Width: 420}, nil, func() {
+	ui.Modal(c, &w.clearOpen, logs.ClearTitle, ui.ModalSpec{Description: logs.ClearMessage, Width: 420}, nil, func() {
 		if ui.Button(c, logs.Cancel).Outline().Clicked() {
 			w.clearOpen = false
 		}
@@ -541,7 +546,7 @@ func (w *window) dialogs(c ui.C) {
 			w.clearOpen = false
 		}
 	})
-	closed := ui.ModalWith(c, &w.bookmarkOpen, logs.NameForFilter, ui.ModalSpec{Width: 360}, func() {
+	closed := ui.Modal(c, &w.bookmarkOpen, logs.NameForFilter, ui.ModalSpec{Width: 360}, func() {
 		field := ui.TextField(c, &w.bookmarkName, logs.NameForFilter, logs.NameForFilter).FillWidth()
 		if field.Submitted() {
 			w.saveBookmark()

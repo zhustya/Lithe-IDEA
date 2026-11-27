@@ -96,6 +96,31 @@ func buildPagesWindow(t *testing.T, count int) (*window, *windowDriver) {
 	return w, d
 }
 
+func TestBuildSettingsOpensOptionsForTheChosenWorkspaceInstance(t *testing.T) {
+	w, d := buildPagesWindow(t, 2)
+	opened := ""
+	w.ctrl.SetWorkspaceBuildOptions(map[string][]WorkspaceBuildOptions{
+		"bs00": {
+			{InstanceID: "root", PluginID: "dev.example.bs00", Name: "Builder 00", Open: func() { opened = "root" }},
+			{InstanceID: "child", PluginID: "dev.example.bs00", Name: "Builder 00", Root: "subproject", Open: func() { opened = "child" }},
+		},
+	})
+	w.openKind("buildSystem")
+	w.inv.Invalidate()
+	const child = "Builder 00 workspace options (subproject)"
+	d.until("the detected workspace options", func() bool { return d.has(child) })
+	d.click(child)
+	if opened != "child" {
+		t.Fatalf("opened %q, want the nested instance", opened)
+	}
+	w.ctrl.SetWorkspaceBuildOptions(nil)
+	w.inv.Invalidate()
+	d.pump()
+	if d.has(child) || d.has("Builder 00 workspace options") {
+		t.Fatal("closed workspace still offers links to its build instances")
+	}
+}
+
 // buildRows are the rows below Build, Execution, Deployment: the kinds' rows and any plugin
 // page a search lists.
 func buildRows(w *window) []row {
@@ -186,7 +211,7 @@ func TestBuildKindIsOneRowThatOpensItsPage(t *testing.T) {
 			t.Fatalf("the kind's page does not list %q", title)
 		}
 	}
-	if total := i18n.SharedFormat(i18n.English, "desktop.buildSettings.kindPageCount", map[string]string{"count": formatCount(count)}); !d.text(total) {
+	if total := kindPageCount(i18n.English, count); !d.text(total) {
 		t.Fatalf("the kind's page does not count its pages as %q", total)
 	}
 	if !d.has(i18n.Shared(i18n.English, "desktop.buildSettings.kindFilter")) {

@@ -27,23 +27,31 @@ const (
 	pageFonts
 	pageKeymap
 	pageProcessTermination
-	// The pages on the top level of the sidebar.
+	// pagePlugins is a page on the top level of the sidebar.
 	pagePlugins
+	// pageVersionControl is the group "Version Control", which also has a page of its own:
+	// the directory of its pages. The Git page after it belongs to it.
 	pageVersionControl
+	pageGit
 	// pageBuild is the group "Build, Execution, Deployment", which also has a page of its
-	// own: the directory of its pages and what needs attention. The three pages after it
+	// own: the directory of its pages and what needs attention. The two pages after it
 	// belong to it, and so does a row for each kind of page plugins contribute to it, build
 	// systems and compilers, which opens that kind's pages as Toolchains and Debuggers list
 	// theirs.
 	pageBuild
 	pageToolchains
 	pageDebuggers
-	pageConsole
+	// pageLanguages is "Languages & Frameworks", a top-level page with no static pages
+	// under it: the pages plugins contribute to it make it a group, and its own page is the
+	// directory of them.
 	pageLanguages
-	// pageTools is the group "Tools"; the page after it belongs to it.
+	// pageTools is the group "Tools"; the five pages after it belong to it.
 	pageTools
 	pageTerminal
 	pageSearch
+	pageConsole
+	pageTrustedLocations
+	pageRemoteWorkspace
 	// pageAI is the group "AI"; the two pages after it belong to it.
 	pageAI
 	pageAIGeneration
@@ -69,14 +77,17 @@ var parents = [pageCount]pageID{
 	pageProcessTermination: pageAppearance,
 	pagePlugins:            noPage,
 	pageVersionControl:     noPage,
+	pageGit:                pageVersionControl,
 	pageBuild:              noPage,
 	pageToolchains:         pageBuild,
 	pageDebuggers:          pageBuild,
-	pageConsole:            pageBuild,
 	pageLanguages:          noPage,
 	pageTools:              noPage,
 	pageTerminal:           pageTools,
 	pageSearch:             pageTools,
+	pageConsole:            pageTools,
+	pageTrustedLocations:   pageTools,
+	pageRemoteWorkspace:    pageTools,
 	pageAI:                 noPage,
 	pageAIGeneration:       pageAI,
 	pageIDEAPI:             pageAI,
@@ -105,8 +116,13 @@ func isGroup(id pageID) bool {
 }
 
 // ownsPage says whether the group id also opens a page of its own when its row is
-// chosen, instead of only expanding and collapsing.
-func ownsPage(id pageID) bool { return id == pageBuild }
+// chosen, instead of only expanding and collapsing: Version Control, Build, Execution,
+// Deployment and Languages & Frameworks open the directory of their pages
+// (version_control_view.go, build_directory_view.go, languages_view.go), which the
+// breadcrumb above one of those pages links to as well.
+func ownsPage(id pageID) bool {
+	return id == pageVersionControl || id == pageBuild || id == pageLanguages
+}
 
 // titleOf is the name of an entry in the language of messages.
 func titleOf(messages *i18n.SettingsMessages, id pageID) string {
@@ -129,6 +145,8 @@ func titleOf(messages *i18n.SettingsMessages, id pageID) string {
 		return messages.Plugins
 	case pageVersionControl:
 		return messages.VersionControl
+	case pageGit:
+		return messages.Git
 	case pageBuild:
 		return messages.Build
 	case pageToolchains:
@@ -137,6 +155,10 @@ func titleOf(messages *i18n.SettingsMessages, id pageID) string {
 		return messages.Debuggers
 	case pageConsole:
 		return messages.Console
+	case pageTrustedLocations:
+		return messages.TrustedLocations
+	case pageRemoteWorkspace:
+		return messages.RemoteWorkspace
 	case pageLanguages:
 		return messages.Languages
 	case pageTools:
@@ -321,6 +343,14 @@ func kindTitle(language i18n.Language, kind string) string {
 // pageKeywords are the words besides its title a search finds a page by.
 func pageKeywords(language i18n.Language, id pageID) string {
 	switch id {
+	case pageGeneral:
+		return i18n.Shared(language, "desktop.cli.title")
+	case pageEditor:
+		return i18n.Shared(language, "desktop.editorPrefs.autoCompletion") + " " +
+			i18n.Shared(language, "desktop.editorPrefs.rainbowBrackets") + " " +
+			i18n.Shared(language, "desktop.editorPrefs.rainbowVariables") + " " +
+			i18n.Shared(language, "desktop.editorPrefs.indentGuides") + " " +
+			i18n.Shared(language, "desktop.editorPrefs.rainbowIndentGuides")
 	case pageBuild:
 		return i18n.Shared(language, "desktop.buildSettings.keywordsBuild")
 	case pageToolchains:
@@ -329,6 +359,10 @@ func pageKeywords(language i18n.Language, id pageID) string {
 		return i18n.Shared(language, "desktop.buildSettings.keywordsDebuggers")
 	case pageConsole:
 		return i18n.Shared(language, "desktop.consoleSettings.keywords")
+	case pageTrustedLocations:
+		return i18n.Shared(language, "desktop.trustedLocations.keywords")
+	case pageRemoteWorkspace:
+		return i18n.Shared(language, "desktop.remoteSettings.keywords")
 	}
 	return ""
 }

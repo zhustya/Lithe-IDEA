@@ -23,6 +23,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/1lck/Lithe-IDEA/desktop/internal/atomicfile"
 )
 
 // Directory is the name of the client's folder inside the user configuration directory.
@@ -178,9 +180,21 @@ func (store *Store) Unknown(name string) []string {
 // the file is first moved aside to SetAsideName(name, time), so a save never destroys content a
 // load could not read, and the file that holds the new value works again from this save on.
 func (store *Store) Save(name string, value any) error {
-	if err := store.setAside(name); err != nil {
-		return err
+	_, err := store.SaveWithBackup(name, value)
+	return err
+}
+
+// SaveWithBackup also returns the path of an unreadable file moved aside by this save.
+// The path is returned even if writing its replacement fails.
+func (store *Store) SaveWithBackup(name string, value any) (string, error) {
+	backup, err := store.setAside(name)
+	if err != nil {
+		return "", err
 	}
+	return backup, store.saveJSON(name, value)
+}
+
+func (store *Store) saveJSON(name string, value any) error {
 	store.mu.Lock()
 	kept := store.kept[name]
 	store.mu.Unlock()
@@ -215,20 +229,25 @@ func SetAsideName(name string, at time.Time) string {
 // check, the rename and clearing the failure happen under one lock, so concurrent saves never move
 // the file a first save has just written. A file already gone has nothing to keep. A rename that
 // fails keeps the failure and fails the save, so the unreadable file stays where it was.
-func (store *Store) setAside(name string) error {
+func (store *Store) setAside(name string) (string, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	failed := store.failedLoad[name]
 	if failed == nil {
-		return nil
+		return "", nil
 	}
 	path := filepath.Join(store.dir, name)
 	aside := filepath.Join(store.dir, SetAsideName(name, store.now()))
-	if err := os.Rename(path, aside); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("move unreadable %s aside before saving: %w", name, errors.Join(err, failed))
+	err := os.Rename(path, aside)
+	if errors.Is(err, fs.ErrNotExist) {
+		delete(store.failedLoad, name)
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("move unreadable %s aside before saving: %w", name, errors.Join(err, failed))
 	}
 	delete(store.failedLoad, name)
-	return nil
+	return aside, nil
 }
 
 // Path is where the file name lives, for a reader that streams it instead of loading it whole,
@@ -246,28 +265,11 @@ func (store *Store) Remove(name string) error {
 	return nil
 }
 
-// WriteFile replaces the file name with data atomically, as Save does for JSON. It keeps a
-// file the client owns that is not JSON, such as the workbench background image.
+// WriteFile replaces the file name with data atomically, as Save does for JSON.
+// It keeps a file the client owns that is not JSON, such as a background image.
 func (store *Store) WriteFile(name string, data []byte) error {
 	if err := os.MkdirAll(store.dir, 0o755); err != nil {
 		return err
 	}
-	file, err := os.CreateTemp(store.dir, "."+name+".*.tmp")
-	if err != nil {
-		return err
-	}
-	temporary := file.Name()
-	defer os.Remove(temporary) // no-op once the rename succeeded
-	if _, err := file.Write(data); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		file.Close()
-		return err
-	}
-	if err := file.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporary, filepath.Join(store.dir, name))
+	return atomicfile.Write(filepath.Join(store.dir, name), data, 0o600)
 }

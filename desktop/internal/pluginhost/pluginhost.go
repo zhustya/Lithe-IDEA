@@ -91,11 +91,12 @@ type Capabilities map[string][]int
 //     and documentLink), window/showInformation|showWarning|showError,
 //     browser/openExternal (http and https only), terminal/create|show|close|
 //     reopen|dispose|onExit, documents/registerContentProvider, run/start|stop|
-//     didExit and debug/start. Window-bound methods are registered only when the
+//     didExit, debug/start and workspace/readDirectory|stat|readFile|watch|
+//     findFiles|findText (bounded disk reads, search and event projection through
+//     Core, with Viva native watches). Window-bound methods are registered only when the
 //     window attaches (Service.AttachWorkbench); getCapabilities lists only what
-//     is registered. Workspace file and search services and preview/openHTML are
-//     not registered, so a plugin that needs one is refused when it asks for
-//     that permission.
+//     is registered. preview/openHTML is not registered, so a plugin that needs
+//     it is refused when it asks for that permission.
 //   - buildSystems and buildProviders: the Build window detects instances,
 //     loads provider models, resolves the ordered executable candidates Core
 //     returns, runs command and provider tasks, prepares application targets
@@ -108,8 +109,11 @@ type Capabilities map[string][]int
 //   - runConfigurationTypes: the Run/Debug Configurations dialog lists the
 //     kinds a build system declares after the built-in ones, edits them with the
 //     form Core describes in the plugin's translation, saves them and runs them
-//     with the command Core plans for the detected instance. A declared kind has
-//     no debugger.
+//     with the command Core plans for the detected instance. buildSystems[].run[]
+//     may also target a declared kind via configurationType and values so
+//     discovered model targets materialize generated configurations under the
+//     same group, icon, editor form and launch plan. A declared kind has no
+//     debugger.
 //   - beforeLaunchTasks: the Add New Task menu of every configuration's Before
 //     launch list offers the tasks a build system declares, edits each with the
 //     form Core describes in the plugin's translation, and runs the step with
@@ -126,7 +130,10 @@ type Capabilities map[string][]int
 //     systemCommand launch names but the machine lacks, and installs them with
 //     the plugin's tool after the user confirms the command line, the network
 //     use and the target (the plugin's managed directory or the tool's own);
-//     systemCommand launches then find them there (CommandStore).
+//     systemCommand launches then find them there (CommandStore). Version 1
+//     adds pinned archive downloads, which the host downloads, checks against
+//     the pinned SHA-256 and extracts below the plugin's managed directory
+//     after the user confirms the version and the URL.
 //   - projectGenerators: the New Project window lists generators, evaluates
 //     their forms through Core, discovers tools with the shared toolchain and
 //     runs the plan in a staging directory.
@@ -193,7 +200,8 @@ func Declared() Capabilities {
 	// settings window's source forms render.
 	declared["sourceSettings"] = []int{0, 1}
 	// Version 1 adds command-sourced discovery in the Build test tree.
-	declared["buildSystems"] = []int{0, 1}
+	// Version 2 adds registry connection debugging for provider applications.
+	declared["buildSystems"] = []int{0, 1, 2}
 	// Version 1 adds entrypoint runs, which Run on Current File starts.
 	declared["buildProviders"] = []int{0, 1}
 	// Version 1 adds a definition's category and audience, by which the
@@ -202,6 +210,13 @@ func Declared() Capabilities {
 	// Version 1 adds optional mirror URLs on managed runtime artifacts for automatic
 	// fastest-source selection and failover.
 	declared["managedRuntimes"] = []int{0, 1}
+	// Version 1 adds installers that download a pinned archive instead of running
+	// a tool; the host extracts it below the plugin's managed command directory.
+	declared["commandInstallers"] = []int{0, 1}
+	// Version 1 adds a server's executesProjectCode: in a project in safe mode Core
+	// starts only the servers that declare false, and the status bar says why the
+	// others wait for trust (#2208).
+	declared["languageServers"] = []int{0, 1}
 	return declared
 }
 

@@ -94,7 +94,7 @@ func TestConsoleListsTheRecordedCommands(t *testing.T) {
 	}
 }
 
-// The display switches of the Version Control settings take effect at once: the console asks
+// The display switches of the Git settings take effect at once: the console asks
 // Core to present its records again with them, and they are kept with the settings.
 func TestConsoleRedrawsWithTheDisplayChoices(t *testing.T) {
 	dir := newTestRepository(t)
@@ -118,6 +118,45 @@ func TestConsoleRedrawsWithTheDisplayChoices(t *testing.T) {
 	if !h.app.settings.GitConsole.HideRepository {
 		t.Fatalf("the preferences were not kept: settings %+v", h.app.settings.GitConsole)
 	}
+}
+
+// Exercise the console's scroll consumers with enough presented rows that
+// the search hit and the last output line cannot share a viewport.
+func TestConsolePaintsSearchHitAndEndOnFirstFrame(t *testing.T) {
+	h := newHarness(t, gitKernel{core.NewClient()})
+	h.openConsole(t, newTestRepository(t))
+	v := &h.app.consoleView
+	v.rows = make([]consoleRow, 160)
+	for i := range v.rows {
+		v.rows[i].text = fmt.Sprintf("scroll-output-%03d", i)
+	}
+	v.revision++
+	v.hits = []consoleHit{{row: 4}}
+	v.hitIndex = -1
+	h.app.consoleScrollToEnd()
+	h.app.invalidator.Invalidate()
+	h.settle()
+	paint := func(want, offscreen string) {
+		t.Helper()
+		h.app.invalidator.Invalidate()
+		if err := h.driver.Pump(); err != nil {
+			t.Fatal(err)
+		}
+		if !h.showsWrapped(want) || h.showsWrapped(offscreen) {
+			t.Fatalf("expected %q in the first frame and %q outside the viewport", want, offscreen)
+		}
+	}
+	if !h.showsWrapped("scroll-output-159") || h.showsWrapped("scroll-output-004") {
+		t.Fatal("console did not start at the end")
+	}
+	h.app.stepConsoleMatch(1)
+	paint("scroll-output-004", "scroll-output-159")
+	h.app.consoleScrollToEnd()
+	paint("scroll-output-159", "scroll-output-004")
+	h.app.stepConsoleMatch(1)
+	paint("scroll-output-004", "scroll-output-159")
+	h.app.showGitConsole(itemCommit)
+	paint("scroll-output-159", "scroll-output-004")
 }
 
 func TestConsoleSearchesAndClears(t *testing.T) {

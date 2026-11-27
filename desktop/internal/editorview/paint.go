@@ -107,6 +107,10 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 	v.hl.Prepare(prepareFirst, prepareLast)
 
 	selStart, selEnd := v.Selection()
+	var symbolRanges []Range
+	if v.symbolRevision == v.revision && v.symbolSelection == (Range{Start: selStart, End: selEnd}) {
+		symbolRanges = v.symbolRanges
+	}
 	caretLine := v.text.LineOf(v.caret)
 	textArea := gfx.Rect{X: area.X + gutter, Y: area.Y, Width: v.textRight - area.X - gutter, Height: area.Height}
 	bottom := area.Y + area.Height
@@ -117,6 +121,26 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 	annotation := 0
 	top := area.Y + float32(firstRow-firstSub)*v.lineH - v.scroll
 	composeRow, composeAt, composeCells := v.compositionRoom()
+	bracketPair := v.caretBracketPair(selStart, selEnd)
+	guideUnit := 0
+	var guideScopes []indentScopeGuide
+	activeGuideScope := -1
+	var fallbackGuide fallbackIndentGuide
+	if v.presentation.IndentGuides {
+		guideUnit, _ = v.IndentSettings()
+		if v.indentGuideRevision == v.revision {
+			guideScopes = v.indentGuideScopes
+		}
+		if len(guideScopes) > 0 {
+			activeGuideScope = activeIndentScope(guideScopes, v.caret)
+		}
+		if activeGuideScope < 0 {
+			fallbackGuide = v.fallbackActiveGuide(caretLine, guideUnit)
+		}
+	}
+	var guideGap indentGuideGap
+	guideInk := look.Foreground
+	guideInk.Alpha *= 0.16
 	for line := firstLine; line <= lastLine; line++ {
 		l := v.ref(line)
 		wraps := v.rowsOf(l)
@@ -135,8 +159,35 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 			v.extraCells = v.extraSelectionCells(l, v.extraCells)
 		}
 		v.tokens = v.hl.Line(v.tokens[:0], line)
+		v.decor.colorLine = nil
+		if len(v.decor.colors) > 0 {
+			v.decor.colorLine, v.decor.colorBase = v.lineColors(l.start, l.start+l.size), l.start
+		}
 		lineHints := v.lineInlayHints(line)
-		for k, row := range wraps {
+		guideCells, guideScope, activeGuideDepth := 0, -1, 0
+		if guideUnit > 0 {
+			if len(guideScopes) > 0 {
+				guideScope = indentScopeAtLine(guideScopes, line)
+			}
+			if guideScope < 0 {
+				// Brace ranges cover their own block rows. Other rows still use indentation.
+				guideCells = v.indentGuideCells(l, &guideGap)
+			} else if outer := guideScopes[guideScope].outerColumn; outer > guideUnit {
+				// Retain surrounding indentation to the left of the structural guides.
+				guideCells = min(v.indentGuideCells(l, &guideGap), outer-1)
+			}
+			if line >= fallbackGuide.first && line <= fallbackGuide.last {
+				activeGuideDepth = fallbackGuide.depth
+			}
+		}
+		// rowLine already located the first visible row. Walking its preceding rows
+		// makes repainting a deeply scrolled long line depend on its entire prefix.
+		first := 0
+		if line == firstLine {
+			first = firstSub
+		}
+		for k := first; k < len(wraps); k++ {
+			row := wraps[k]
 			y := top + float32(k)*v.lineH
 			if y+v.lineH <= area.Y {
 				continue
@@ -153,7 +204,21 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 			if !v.wrapping() {
 				from, to = v.visibleCells()
 			}
+			if guideScope >= 0 {
+				v.paintScopeGuides(canvas, guideScopes, guideScope, activeGuideScope, guideUnit, activeGuideDepth, from, to, shift, y, guideInk)
+			}
+			if guideCells >= guideUnit && guideUnit > 0 {
+				v.paintIndentGuides(canvas, guideCells, guideUnit, activeGuideDepth, from, to, shift, y, guideInk)
+			}
 			v.paintInline(canvas, line, from, to, shift, y)
+			end := l.size
+			if k+1 < len(wraps) {
+				end = wraps[k+1].at
+			}
+			p := v.part(l, row, end, from, to)
+			if !v.preedit.Composing && (len(symbolRanges) > 0 || bracketPair[0] < bracketPair[1]) {
+				v.paintContextHighlights(canvas, l, p, end, from, to, shift, y, look, symbolRanges, bracketPair)
+			}
 			lo, hi := selFrom, selTo
 			if v.wrapping() {
 				lo, hi = max(lo, row.cells), min(hi, to)
@@ -174,11 +239,6 @@ func (v *View) Paint(canvas *gfx.Canvas, area gfx.Rect, look Look) {
 					}
 				}
 			}
-			end := l.size
-			if k+1 < len(wraps) {
-				end = wraps[k+1].at
-			}
-			p := v.part(l, row, end, from, to)
 			v.paintSearchMatches(canvas, l, p, from, to, shift, y, look.Selection)
 			if len(lineHints) > 0 {
 				if line == caretLine && k == composeRow && composeCells > 0 {
@@ -440,6 +500,17 @@ func (v *View) paintRow(canvas *gfx.Canvas, text string, base int, row wrapRow, 
 	// labelEnd the column after its last character; labelAt and labelTo are the bytes of the
 	// line it shows.
 	label, labelEnd, labelAt, labelTo := -1, 0, base, base
+	// colors are the provider colors of the line, and colorAt the first that ends after the row's
+	// start; their offsets are the text's, base of the line's.
+	colors, colorBase := v.decor.colorLine, v.decor.colorBase
+	colorAt := 0
+	if len(colors) > 0 {
+		colorAt = sort.Search(len(colors), func(i int) bool { return int(colors[i].end)-colorBase > row.at })
+	}
+	// look is how the characters up to lookEnd draw: lookEnd is the next byte where a token or a
+	// provider color starts or ends, so the style is resolved once per span, not per character.
+	var look runLook
+	lookEnd := -1
 	for i := row.at; i < stop; {
 		at := i
 		r, size := utf8.DecodeRuneInString(text[i-base:])
@@ -469,19 +540,10 @@ func (v *View) paintRow(canvas *gfx.Canvas, text string, base int, row wrapRow, 
 			v.paintLabel(canvas, text[labelAt-base:labelTo-base], label, labelEnd, shift, y, textStyle)
 			label, labelAt, labelTo, run = cells, at, at, -1
 		}
-		for token+1 < len(v.tokens) && int(v.tokens[token+1].Start) <= at {
-			token++
+		if at >= lookEnd {
+			look, lookEnd, token, colorAt = v.runLookAt(at, token, colors, colorAt, defaultStyle)
 		}
-		style := defaultStyle
-		if token < len(v.tokens) {
-			style = v.theme.Style(v.tokens[token].Name)
-		}
-		color := uiColor(style.Foreground)
-		weight := float32(0)
-		if style.Font&syntax.Bold != 0 {
-			weight = gfx.WeightBold
-		}
-		italic := style.Font&syntax.Italic != 0
+		color, weight, italic := look.color, look.weight, look.italic
 		ascii := r < 0x80
 		if ascii && runASCII && run >= 0 &&
 			v.runs[run].Color == color && v.runs[run].Weight == weight && v.runs[run].Italic == italic {
@@ -498,8 +560,7 @@ func (v *View) paintRow(canvas *gfx.Canvas, text string, base int, row wrapRow, 
 			}
 			v.runs = append(v.runs, gfx.TextRun{
 				Column: int32(cells - label), Bytes: int32(bytes), Cells: int32(width),
-				Color: color, Weight: weight, Italic: italic, Underline: style.Font&syntax.Underline != 0,
-				Strike: style.Font&syntax.Strikethrough != 0,
+				Color: color, Weight: weight, Italic: italic, Underline: look.underline, Strike: look.strike,
 			})
 			run, runASCII = len(v.runs)-1, ascii
 		}
@@ -511,6 +572,54 @@ func (v *View) paintRow(canvas *gfx.Canvas, text string, base int, row wrapRow, 
 		}
 	}
 	v.paintLabel(canvas, text[labelAt-base:labelTo-base], label, labelEnd, shift, y, textStyle)
+}
+
+// runLook is how one span of a row draws: its token's style with a provider's color laid over.
+type runLook struct {
+	color                     gfx.Color
+	weight                    float32
+	italic, underline, strike bool
+}
+
+// runLookAt resolves the look of the character at byte at of the line and the byte where it next
+// changes. token and colorAt only move forward, as the row's characters do.
+func (v *View) runLookAt(at, token int, colors []colorDecorationSpan, colorAt int, defaultStyle syntax.Style) (runLook, int, int, int) {
+	for token+1 < len(v.tokens) && int(v.tokens[token+1].Start) <= at {
+		token++
+	}
+	style := defaultStyle
+	if token < len(v.tokens) {
+		style = v.theme.Style(v.tokens[token].Name)
+	}
+	end := math.MaxInt
+	if token+1 < len(v.tokens) {
+		end = int(v.tokens[token+1].Start)
+	}
+	look := runLook{
+		color: uiColor(style.Foreground), italic: style.Font&syntax.Italic != 0,
+		underline: style.Font&syntax.Underline != 0, strike: style.Font&syntax.Strikethrough != 0,
+	}
+	if style.Font&syntax.Bold != 0 {
+		look.weight = gfx.WeightBold
+	}
+	base := v.decor.colorBase
+	for colorAt < len(colors) && int(colors[colorAt].end)-base <= at {
+		colorAt++
+	}
+	if colorAt < len(colors) {
+		span := colors[colorAt]
+		if start := int(span.start) - base; start <= at {
+			pair := v.decor.colorPalette[span.color]
+			look.color = pair.light
+			if v.themeDark {
+				look.color = pair.dark
+			}
+			end = min(end, int(span.end)-base)
+		} else {
+			end = min(end, start)
+		}
+	}
+	return look, end, token, colorAt
 }
 
 // replacementChar is what a byte that is not UTF-8 shows, as range over a string reads it.

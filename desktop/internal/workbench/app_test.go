@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,8 @@ import (
 )
 
 // testKernel answers the layout and recent project reducers with the real kernel and Git
-// status with the answer the test chose.
+// status with the answer the test chose. It lists no WSL distributions, as Core answers on a
+// system without WSL, so the window looks the same whichever distributions the test computer has.
 type testKernel struct {
 	*core.Client
 	status        core.GitStatus
@@ -25,6 +27,10 @@ type testKernel struct {
 
 func (k *testKernel) GitStatus(context.Context, string) (core.GitStatus, error) {
 	return k.status, nil
+}
+
+func (k *testKernel) RemoteListWSLDistributions(context.Context) (core.RemoteWSLDistributions, error) {
+	return core.RemoteWSLDistributions{}, nil
 }
 
 func (k *testKernel) ReduceChromeLayout(ctx context.Context, catalog []core.ChromeItem, state core.ChromeLayout, action core.ChromeAction) (core.ChromeLayout, bool, error) {
@@ -102,7 +108,12 @@ func newHarnessWithDriver(t testing.TB, options Options, open func(app.Config) (
 	// Tests open their folders trusted, as IDEA's unit-test mode does; the trust flow's own tests
 	// clear it before they open one.
 	options.trustEveryWorkspace = true
+	if options.PluginRecommendationFetcher == nil && !options.DisablePluginRecommendations {
+		options.DisablePluginRecommendations = true
+	}
 	h.app = New(options)
+	// Kept host sessions are remembered in memory, never in this computer's secret store.
+	h.app.remoteSecretStore = &memorySecrets{}
 	h.config = h.app.Config()
 	driver, closeDriver, err := open(h.config)
 	if err != nil {
@@ -147,7 +158,11 @@ func newHarnessWithDriver(t testing.TB, options Options, open func(app.Config) (
 			h.app.closeTerminals(p)
 			h.app.project = nil
 		}
-		h.app.wait()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		if err := h.app.tasks.running.WaitContext(ctx); err != nil {
+			t.Errorf("cleanup: %v (%s)", err, h.taskState())
+		}
 		closeDriver()
 	})
 	return h
@@ -156,17 +171,55 @@ func newHarnessWithDriver(t testing.TB, options Options, open func(app.Config) (
 // settle lets every background task finish and paints their results.
 func (h *harness) settle() {
 	h.t.Helper()
-	h.app.wait()
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
+	defer cancel()
+	h.settleWithin(ctx)
+}
+
+func (h *harness) settleWithin(ctx context.Context) {
+	h.t.Helper()
+	if err := h.app.tasks.running.WaitContext(ctx); err != nil {
+		h.t.Fatalf("settling background tasks: %v (%s)", err, h.taskState())
+	}
 	if err := h.driver.Pump(); err != nil {
 		h.t.Fatalf("Pump: %v", err)
 	}
+}
+
+func (h *harness) taskState() string {
+	h.app.tasks.mu.Lock()
+	queued := len(h.app.tasks.pending)
+	h.app.tasks.mu.Unlock()
+	return fmt.Sprintf("running=%d queued=%d closing=%v branchBusy=%v", h.app.tasks.running.Count(), queued, h.app.closingProject, h.app.branch.busy)
+}
+
+// sendClick paints the immediate input result without waiting for unrelated background work.
+// Its caller must await the specific asynchronous state it asserts, when there is one.
+func (h *harness) sendClick(point gfx.Point) {
+	h.t.Helper()
+	if err := h.driver.Click(point.X, point.Y); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.driver.Pump(); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *harness) sendNamed(name string) {
+	h.t.Helper()
+	h.sendClick(center(h.pageHit(name).Bounds))
 }
 
 // await pumps frames until condition is true, or fails at the deadline. It
 // observes the driver's wake channel rather than sleeping.
 func (h *harness) await(what string, condition func() bool) {
 	h.t.Helper()
-	deadline := time.NewTimer(8 * time.Second)
+	h.awaitWithin(8*time.Second, what, condition)
+}
+
+func (h *harness) awaitWithin(limit time.Duration, what string, condition func() bool) {
+	h.t.Helper()
+	deadline := time.NewTimer(limit)
 	defer deadline.Stop()
 	for {
 		if condition() {
@@ -178,7 +231,7 @@ func (h *harness) await(what string, condition func() bool) {
 				h.t.Fatalf("pump while waiting for %s: %v", what, err)
 			}
 		case <-deadline.C:
-			h.t.Fatalf("timed out waiting for %s", what)
+			h.t.Fatalf("timed out waiting for %s (%s)", what, h.taskState())
 		}
 	}
 }
@@ -215,6 +268,36 @@ func (h *harness) shows(value string) bool {
 		if strings.Contains(label.Value, value) {
 			return true
 		}
+	}
+	return false
+}
+
+// showsFitted is shows for a value a control may shorten to its width: a label holds value
+// whole, or holds the start of value followed by "…" and, once the pointer rests on it,
+// shows value in full in its tooltip. The pointer stays where it rested.
+func (h *harness) showsFitted(value string) bool {
+	h.t.Helper()
+	if h.shows(value) {
+		return true
+	}
+	for _, label := range h.driver.Snapshot().Labels {
+		head, cut := strings.CutSuffix(label.Value, "…")
+		if !cut || head == "" || !strings.HasPrefix(value, head) {
+			continue
+		}
+		at := center(label.Bounds)
+		if err := h.driver.Move(at.X, at.Y); err != nil {
+			h.t.Fatal(err)
+		}
+		if err := h.driver.Advance(time.Second); err != nil {
+			h.t.Fatal(err)
+		}
+		var tip strings.Builder
+		for _, line := range h.tooltips() {
+			tip.WriteString(line.Value)
+		}
+		squeeze := func(s string) string { return strings.Join(strings.Fields(s), "") }
+		return squeeze(tip.String()) == squeeze(value)
 	}
 	return false
 }
@@ -268,7 +351,7 @@ func TestWorkbenchDefaultLayout(t *testing.T) {
 	want := map[zone][]string{
 		zoneLeftTop:     {itemProject, itemCommit, itemStructure, itemFind},
 		zoneLeftBottom:  nil,
-		zoneBottomLeft:  {itemGit, itemTerminal, itemProblems, itemReferences, itemRun, itemTests, itemSecurity, itemDebug},
+		zoneBottomLeft:  {itemGit, itemTerminal, itemProblems, itemReferences, itemOutput, itemRun, itemTests, itemSecurity, itemDebug},
 		zoneRightTop:    {itemBuild, itemNotifications},
 		zoneRightBottom: nil,
 		zoneBottomRight: {itemBackground},
@@ -911,6 +994,35 @@ func TestMarketplaceWidthPersistsWithOtherSettings(t *testing.T) {
 	}
 	if saved.MarketplaceWidth != 420 || saved.Language != "zh-Hans" || saved.Theme != themeDark {
 		t.Fatalf("saved settings lost values: %+v", saved)
+	}
+}
+
+// TestSettingsWindowSizePersistsWithOtherSettings covers the size the user gave the settings
+// window: it is saved with the other settings, only when it changes, and the next workbench
+// reads it back for the settings window it opens.
+func TestSettingsWindowSizePersistsWithOtherSettings(t *testing.T) {
+	h := newHarness(t, &testKernel{Client: core.NewClient()})
+	h.app.setLanguage("zh-Hans")
+	h.app.setSettingsWindowSize(1100, 760)
+	var saved settings
+	found, err := h.store.Load(settingsFile, &saved)
+	if err != nil || !found {
+		t.Fatalf("load saved settings: found=%v err=%v", found, err)
+	}
+	if saved.SettingsWindowWidth != 1100 || saved.SettingsWindowHeight != 760 || saved.Language != "zh-Hans" || saved.Theme != themeDark {
+		t.Fatalf("saved settings lost values: %+v", saved)
+	}
+	if err := os.Remove(filepath.Join(h.store.Dir(), settingsFile)); err != nil {
+		t.Fatal(err)
+	}
+	h.app.setSettingsWindowSize(1100, 760)
+	if _, err := os.Stat(filepath.Join(h.store.Dir(), settingsFile)); !os.IsNotExist(err) {
+		t.Fatalf("an unchanged size saved the settings again: %v", err)
+	}
+	h.app.setSettingsWindowSize(1180, 820)
+	reloaded := newHarnessWithOptions(t, Options{Kernel: &testKernel{Client: core.NewClient()}, Store: h.store, Languages: []string{"zh-Hans"}})
+	if got := reloaded.app.settings; got.SettingsWindowWidth != 1180 || got.SettingsWindowHeight != 820 {
+		t.Fatalf("reloaded settings window size = %dx%d, want 1180x820", got.SettingsWindowWidth, got.SettingsWindowHeight)
 	}
 }
 

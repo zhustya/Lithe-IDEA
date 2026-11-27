@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/1lck/Lithe-IDEA/desktop/internal/configfile"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprefs"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/icons"
@@ -25,55 +25,16 @@ import (
 // local list, else the team's, else its default of every dot-named directory (build.resolveStoredOptions),
 // and replaces or removes the local list (build.editIgnoredPaths).
 
-// buildTeamOptionsFile is the team Build options document, relative to the project root.
-const buildTeamOptionsFile = ".lithe/build/options.json"
+const buildTeamOptionsFile = buildprefs.TeamFile
+const buildLocalOptionsFile = buildprefs.LocalFile
 
-// buildLocalOptionsFile is the data-store file of the local documents, keyed by project root.
-const buildLocalOptionsFile = "build-local-options.json"
-
-// buildOptionsMaximumBytes bounds the team document the host reads.
-const buildOptionsMaximumBytes = 1 << 20
-
-// emptyBuildOptionDocument and emptyBuildLocalDocument are what a project without stored options reads as.
-var (
-	emptyBuildOptionDocument = json.RawMessage(`{"version":1,"systems":{}}`)
-	emptyBuildLocalDocument  = json.RawMessage(`{"version":1,"document":{"version":1,"systems":{}}}`)
-)
-
-// buildOptionDocuments are the team and local documents of one project as they are stored.
 type buildOptionDocuments struct {
 	team, local json.RawMessage
 }
 
-// readBuildOptionDocuments reads the team document from the project and the local document from the data
-// store. A document that exists but is not valid JSON is an error, not an empty document.
 func (a *App) readBuildOptionDocuments(ctx context.Context, root string) (buildOptionDocuments, error) {
-	docs := buildOptionDocuments{team: emptyBuildOptionDocument, local: emptyBuildLocalDocument}
-	snapshot, err := configfile.Capture(ctx, root, buildTeamOptionsFile, buildOptionsMaximumBytes)
-	if err != nil {
-		return docs, err
-	}
-	if snapshot.Exists() {
-		team := snapshot.Bytes()
-		if !json.Valid(team) {
-			return docs, errors.New(buildTeamOptionsFile + ": invalid JSON")
-		}
-		docs.team = team
-	}
-	if a.store == nil {
-		return docs, nil
-	}
-	all := map[string]json.RawMessage{}
-	found, err := a.store.Load(buildLocalOptionsFile, &all)
-	if err != nil {
-		return docs, err
-	}
-	if found {
-		if local, ok := all[root]; ok && len(local) > 0 {
-			docs.local = local
-		}
-	}
-	return docs, nil
+	docs, err := buildprefs.Read(ctx, a.store, root)
+	return buildOptionDocuments{team: docs.Team, local: docs.Local}, err
 }
 
 // detectBuildSystemsWithStoredOptions resolves the stored documents and detects the instances with the merged
@@ -424,7 +385,7 @@ func (a *App) storeBuildLocalOptions(root string, local json.RawMessage) error {
 	if _, err := a.store.Load(buildLocalOptionsFile, &all); err != nil {
 		return err
 	}
-	if slices.Equal(local, emptyBuildLocalDocument) {
+	if slices.Equal(local, buildprefs.EmptyLocal) {
 		delete(all, root)
 	} else {
 		all[root] = local
@@ -454,11 +415,11 @@ func (a *App) buildOptionsDialog(c ui.C, p *project) {
 	open := true
 	// Opened on an instance the dialog is that build system's options, as the instance's button
 	// says; from the toolbar it is only the scope of detection.
-	title := i18n.Shared(language, "desktop.build.optionsTitle")
+	title := i18n.Shared(language, "desktop.build.ignoredPaths")
 	if e.instance != "" {
 		title = i18n.SharedFormat(language, "desktop.build.instanceOptions", map[string]string{"name": e.name})
 	}
-	closed := ui.ModalWith(c, &open, title, ui.ModalSpec{Width: 460}, func() {
+	closed := ui.Modal(c, &open, title, ui.ModalSpec{Width: 460}, func() {
 		ui.Column(c.Part("build-options")).FillWidth().Gap(10).Children(func() {
 			a.buildIgnoredPathsSection(c.Part("detection"), p, ready)
 			if e.instance != "" {
@@ -466,11 +427,11 @@ func (a *App) buildOptionsDialog(c ui.C, p *project) {
 				ui.Row(k).FillWidth().Items(ui.Center).Gap(6).MarginTop(6).Children(func() {
 					a.buildOptionsHeading(k, e.name)
 					if e.root != "" {
-						ui.Text(k, e.root).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Ellipsis().Shrink(1).MinWidth(0)
+						ui.Text(c, e.root).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Ellipsis().Shrink(1).MinWidth(0)
 					}
 				})
 				if len(e.fields) == 0 && !e.loading {
-					ui.Wrap(k, i18n.Shared(language, "desktop.build.noOptions")).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
+					ui.Wrap(c, i18n.Shared(language, "desktop.build.noOptions")).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 				}
 				for index := range e.fields {
 					a.drawRunOptionField(k.KeyInt(index), language, &e.fields[index], ready)
@@ -516,33 +477,35 @@ func (a *App) buildOptionsHeading(c ui.C, title string) {
 func (a *App) buildIgnoredPathsSection(c ui.C, p *project, ready bool) {
 	g, language := &p.build.options.ignored, a.language()
 	label := i18n.Shared(language, "desktop.build.ignoredPaths")
-	a.buildOptionsHeading(c, i18n.Shared(language, "desktop.build.detection"))
-	ui.Row(c).FillWidth().Items(ui.Center).Gap(4).Children(func() {
-		ui.Text(c, label).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Text).Shrink(0)
-		ui.Button(c.Part("help"), i18n.Shared(language, "native.moreInformation")).Icon(icons.Info).IconOnly().Ghost().Size(18, 18).
-			Tooltip(i18n.Shared(language, "desktop.build.ignoredPathsHelp")).TooltipOn(ui.TooltipRight)
-		ui.Spacer(c)
-		if g.source == core.BuildIgnoredPathsLocal && !g.inherit {
-			if ui.Button(c.Part("restore"), i18n.Shared(language, "native.restoreDefault")).Ghost().Small().Disabled(!ready || g.restoring).Clicked() {
-				c.After(func() {
-					a.performed("build.ignoredPaths.restoreDefault", surfaceButton)
-					a.readBuildIgnoredPaths(p, true)
-				})
+	ui.Column(c).FillWidth().Gap(10).Children(func() {
+		a.buildOptionsHeading(c, i18n.Shared(language, "desktop.build.detection"))
+		ui.Row(c).FillWidth().Items(ui.Center).Gap(4).Children(func() {
+			ui.Text(c, label).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Text).Shrink(0)
+			ui.Button(c.Part("help"), i18n.Shared(language, "native.moreInformation")).Icon(icons.Info).IconOnly().Ghost().Size(18, 18).
+				Tooltip(i18n.Shared(language, "desktop.build.ignoredPathsHelp")).TooltipOn(ui.TooltipRight)
+			ui.Spacer(c)
+			if g.source == core.BuildIgnoredPathsLocal && !g.inherit {
+				if ui.Button(c.Part("restore"), i18n.Shared(language, "native.restoreDefault")).Ghost().Small().Disabled(!ready || g.restoring).Clicked() {
+					c.After(func() {
+						a.performed("build.ignoredPaths.restoreDefault", surfaceButton)
+						a.readBuildIgnoredPaths(p, true)
+					})
+				}
 			}
+		})
+		ui.TextArea(c.Part("patterns"), &g.text, label, "").FillWidth().Height(72).Disabled(!ready || !g.loaded || g.restoring)
+		if !g.loaded {
+			return
 		}
+		var source string
+		switch g.source {
+		case core.BuildIgnoredPathsLocal:
+			source = i18n.Shared(language, "desktop.build.ignoredPathsLocal")
+		case core.BuildIgnoredPathsTeam:
+			source = i18n.SharedFormat(language, "desktop.build.ignoredPathsTeam", map[string]string{"file": buildTeamOptionsFile})
+		default:
+			source = i18n.Shared(language, "desktop.build.ignoredPathsDefault")
+		}
+		ui.Wrap(c, source).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 	})
-	ui.TextArea(c.Part("patterns"), &g.text, label, "").FillWidth().Height(72).Disabled(!ready || !g.loaded || g.restoring)
-	if !g.loaded {
-		return
-	}
-	var source string
-	switch g.source {
-	case core.BuildIgnoredPathsLocal:
-		source = i18n.Shared(language, "desktop.build.ignoredPathsLocal")
-	case core.BuildIgnoredPathsTeam:
-		source = i18n.SharedFormat(language, "desktop.build.ignoredPathsTeam", map[string]string{"file": buildTeamOptionsFile})
-	default:
-		source = i18n.Shared(language, "desktop.build.ignoredPathsDefault")
-	}
-	ui.Wrap(c, source).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
 }

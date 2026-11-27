@@ -20,6 +20,7 @@ import (
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprocess"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/buildprovider"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/configfile"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginbackend"
@@ -122,6 +123,12 @@ type buildInstance struct {
 	// one is known stale; trees are the Build window's trees of the model (build_tree.go).
 	modelVersion uint64
 	trees        buildTrees
+	// Cached manifest option flags/toggles, lazily populated per Manifest/BuildSystemID.
+	manifestCached         bool
+	manifestCachedFor      string
+	manifestCachedBytes    json.RawMessage
+	manifestHasOptions     bool
+	manifestToolbarOptions []buildToolbarOption
 }
 
 // buildOperation is one Build execution the window runs: a task or a run, from the moment its
@@ -143,7 +150,7 @@ type buildOperation struct {
 	then      func(*App, *project)
 	provider  *buildprovider.Client
 	request   *buildprovider.Operation
-	process   *buildprocess.Process
+	process   runProcess
 	cancelled bool
 	// stopped is closed by stop.
 	stopped chan struct{}
@@ -181,6 +188,7 @@ func (a *App) beginOperation(p *project, kind, label, configuration, key string,
 	operation.session = &runEntry{
 		id: "build-" + strconv.Itoa(p.build.sessions), label: label, restart: restart, operation: operation,
 		running: true, started: a.now(), output: newOutputBuffer(buildOutputMaxLines, buildOutputBytes),
+		remote: p.remote != nil,
 	}
 	a.addRunSession(p, operation.session)
 	operation.ide = p.recordIDEOperation(kind, label, configuration)
@@ -249,8 +257,13 @@ func (b *buildState) active() bool { return b.operation != nil || len(b.running)
 // runs; otherwise it stops the one that runs and starts the new one once it ended, so the two
 // never share a port or files. A start that is asked again while one waits replaces it.
 //
-// In safe mode the user is first asked to trust the project, since a run runs its code.
+// In safe mode the user is first asked to trust the project, since a run runs its code. A
+// remote workspace runs only its run configurations, on its host (startRunConfigurationWith
+// checks which); its build systems' tasks and entry points are not run there yet.
 func (a *App) startRun(p *project, key string, start func(*App, *project)) {
+	if !strings.HasPrefix(key, configurationRunKey("")) && a.refuseRemote(p, "run_start") {
+		return
+	}
 	if p.safeMode() {
 		a.askToTrustProject(p, func() { a.startRun(p, key, start) })
 		return
@@ -350,9 +363,20 @@ var errBuildBusy = refuseBuild(refusalBusy, "the Build window is already running
 // window stops and reruns it instead (startRun).
 var errRunRunning = refuseBuild(refusalBusy, "the run configuration is already running")
 
+// runProcess is an operation's process as stop ends it: a process of this computer
+// (*buildprocess.Process) or a remote workspace's process on its host (*remoteProcess).
+type runProcess interface {
+	// Stop asks the process tree to end and kills it once the stop time passed.
+	Stop()
+	// Kill ends the process tree at once.
+	Kill()
+	// Pid is the process's id on this computer, 0 for one that runs elsewhere.
+	Pid() int
+}
+
 // attachProcess makes process the operation's process once it started. It reports false, and
 // stops the process, when the operation was stopped or replaced while the process started.
-func (a *App) attachProcess(p *project, op *buildOperation, process *buildprocess.Process) bool {
+func (a *App) attachProcess(p *project, op *buildOperation, process runProcess) bool {
 	if op.cancelled || !p.build.owns(op) {
 		process.Stop()
 		return false
@@ -361,21 +385,22 @@ func (a *App) attachProcess(p *project, op *buildOperation, process *buildproces
 	op.ide.start()
 	op.session.processRunning = true
 	a.setOperationStatus(p, op, a.text.Build.Running)
+	if pid := process.Pid(); pid > 0 {
+		debugPort := 0
+		if op.debug != nil {
+			debugPort = op.debug.launch.Target.Port
+		}
+		a.startRunPortSampling(p, op.session, pid, debugPort)
+	}
 	return true
 }
 
 // buildRuntime owns provider sessions for one project. A session is keyed by
 // plugin and build system, so two projects never share a process.
 type buildRuntime struct {
-	launches  pluginLaunches
-	mu        sync.Mutex
-	providers map[string]*buildprovider.Client
-	// settings is, for each running provider, the plugin settings it was started with
-	// (buildSettingsKey). The contract restarts a provider on the next request after they change.
-	settings map[string]string
-	// retired are providers a settings change replaced. Each closes once the requests it already
-	// had finished; a detach closes them at once with the others.
-	retired map[*buildprovider.Client]struct{}
+	mu         sync.Mutex
+	providers  map[string]*buildprovider.Client
+	launchKeys map[string]buildProviderLaunchKey
 	// shared maps a plugin and language to the client attached to that
 	// language server's session.
 	shared map[string]*buildprovider.Client
@@ -385,53 +410,83 @@ type buildRuntime struct {
 	detached uint64
 }
 
-// provider is the running provider of instance, started when there is none. The process starts
-// outside the lock, so detaching on the window thread never waits for a start; a start that lost
-// to another one or to a detach is stopped again. logDirectory gives the process's ${logDir}, and
-// is asked only when a process starts.
-//
-// A provider started with other plugin settings than settings holds is replaced, as the contract
-// says: a change of the plugin's settings restarts it on the next request, so its launch
-// arguments reflect the current values. The replaced provider is returned as retired; the
-// caller closes it with retire once the requests it already had finished.
-func (r *buildRuntime) provider(ctx context.Context, runner *pluginbackend.Runner, pluginRoot, root, rootURI string, instance buildInstance, settings core.PluginSettingsState, logDirectory func(context.Context, string) string) (client, retired *buildprovider.Client, err error) {
+type buildProviderLaunchKey struct {
+	settings      string
+	usesToolchain bool
+	toolchain     toolchain.SourceRevision
+}
+
+func (key buildProviderLaunchKey) equal(other buildProviderLaunchKey) bool {
+	return key.settings == other.settings && key.usesToolchain == other.usesToolchain && key.toolchain.Equal(other.toolchain)
+}
+
+var errBuildProviderSourceChanged = errors.New("build provider source changed during launch")
+
+// standaloneBuildProvider starts a process outside the session lock. Only a
+// start from the current project and saved toolchain sources can be published.
+func (a *App) standaloneBuildProvider(ctx context.Context, p *project, instance buildInstance, rootURI string, settings core.PluginSettingsState, settingsKey string, detached uint64) (*buildprovider.Client, error) {
+	r := &p.buildSessions
 	key := instance.PluginID + "\x00" + instance.BuildSystemID
-	errClosing := buildprovider.ErrClosed
-	launchedWith, err := buildSettingsKey(settings)
-	if err != nil {
-		return nil, nil, err
-	}
 	r.mu.Lock()
-	closed, client, detached := r.closed, r.providers[key], r.detached
-	if !closed && client != nil && !client.Closed() && r.settings[key] != launchedWith {
-		retired = client
-		delete(r.providers, key)
-		delete(r.settings, key)
-		if r.retired == nil {
-			r.retired = make(map[*buildprovider.Client]struct{})
+	if err := ctx.Err(); err != nil {
+		r.mu.Unlock()
+		return nil, err
+	}
+	if r.closed || r.detached != detached {
+		r.mu.Unlock()
+		return nil, buildprovider.ErrClosed
+	}
+	client := r.providers[key]
+	if cached := r.launchKeys[key]; client != nil && !client.Closed() && cached.settings == settingsKey {
+		if !cached.usesToolchain {
+			r.mu.Unlock()
+			return client, nil
 		}
-		r.retired[retired] = struct{}{}
-		client = nil
+		r.mu.Unlock()
+		revision, err := a.buildToolchainSource(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		r.mu.Lock()
+		if r.closed || r.detached != detached {
+			r.mu.Unlock()
+			return nil, buildprovider.ErrClosed
+		}
+		if err := ctx.Err(); err != nil {
+			r.mu.Unlock()
+			return nil, err
+		}
+		if r.providers[key] != client {
+			r.mu.Unlock()
+			return nil, errBuildProviderSourceChanged
+		}
+		if !client.Closed() && cached.toolchain.Equal(revision) {
+			r.mu.Unlock()
+			return client, nil
+		}
+	}
+	if client != nil {
+		// Register retirement before releasing the lock that uninstall uses to
+		// take active sessions. There must be no gap in native ownership.
+		a.closingBuildProviders.add(p.ctx, client)
+		delete(r.providers, key)
+		delete(r.launchKeys, key)
 	}
 	r.mu.Unlock()
-	if closed {
-		return nil, nil, errClosing
+	if client != nil {
+		a.retireBuildProvider(ctx, client)
 	}
-	if client != nil && !client.Closed() {
-		return client, nil, nil
-	}
-	state := buildStateDirectory(pluginRoot, root, instance)
-	if err := os.MkdirAll(state, 0o700); err != nil {
-		return nil, retired, err
-	}
+
+	state := buildStateDirectory(a.plugins.Root, p.root, instance)
 	workspaceState := filepath.Join(state, "workspace")
 	temporaryDirectory := filepath.Join(state, "tmp")
 	for _, directory := range []string{workspaceState, temporaryDirectory} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
-			return nil, retired, err
+			return nil, err
 		}
 	}
-	started, err := buildprovider.Start(ctx, runner, pluginbackend.StartRequest{
+	launchKey := buildProviderLaunchKey{settings: settingsKey}
+	started, startErr := buildprovider.Launch(ctx, a.plugins.Backend, pluginbackend.StartRequest{
 		Manifest:                instance.Manifest,
 		PackageDirectory:        instance.PackageDirectory,
 		PluginID:                instance.PluginID,
@@ -440,66 +495,88 @@ func (r *buildRuntime) provider(ctx context.Context, runner *pluginbackend.Runne
 		Role:                    "build",
 		StateDirectory:          state,
 		WorkspaceStateDirectory: workspaceState,
-		LogDirectory:            logDirectory(ctx, instance.PluginID),
+		LogDirectory:            a.pluginLogDirectory(ctx, instance.PluginID),
 		TemporaryDirectory:      temporaryDirectory,
 		Architecture:            core.PluginArchitecture(),
 		Settings:                settings.Settings,
 		ProjectSettings:         settings.ProjectSettings,
 		RootURI:                 rootURI,
-		WorkingDirectory:        root,
+		WorkingDirectory:        p.root,
+		// Core plans no provider process that runs project code in safe mode; the requests
+		// that would reach it already ask to trust the project first.
+		ProjectCodeAllowed: p.trust.allowed(),
+		BeforeResolveTool: func(ctx context.Context) error {
+			revision, err := a.buildToolchainSource(ctx, p)
+			if err != nil {
+				return err
+			}
+			launchKey.toolchain, launchKey.usesToolchain = revision, true
+			return nil
+		},
 	})
-	if err != nil {
-		return nil, retired, err
+	var shared *pluginbackend.SharedProviderError
+	if errors.As(startErr, &shared) {
+		return nil, startErr
+	}
+	if startErr == nil {
+		startErr = started.WaitReady(ctx)
+	}
+	var latest toolchain.SourceRevision
+	var revisionErr error
+	if launchKey.usesToolchain {
+		latest, revisionErr = a.buildToolchainSource(ctx, p)
 	}
 	r.mu.Lock()
-	current := !r.closed && r.detached == detached && ctx.Err() == nil
+	open := !r.closed && r.detached == detached && ctx.Err() == nil
+	current := open && revisionErr == nil && launchKey.toolchain.Equal(latest)
 	client = r.providers[key]
-	if current && (client == nil || client.Closed()) {
+	if current && startErr == nil && client == nil {
 		if r.providers == nil {
 			r.providers = make(map[string]*buildprovider.Client)
-			r.settings = make(map[string]string)
+			r.launchKeys = make(map[string]buildProviderLaunchKey)
 		}
 		r.providers[key] = started
-		r.settings[key] = launchedWith
+		r.launchKeys[key] = launchKey
 		r.mu.Unlock()
-		return started, retired, nil
+		return started, nil
+	}
+	matched := client != nil && !client.Closed() && r.launchKeys[key].equal(launchKey)
+	if started != nil {
+		a.closingBuildProviders.add(p.ctx, started)
 	}
 	r.mu.Unlock()
-	stopCtx, cancel := context.WithTimeout(context.Background(), buildStopTimeout)
-	defer cancel()
-	if err := started.Close(stopCtx); err != nil {
-		return nil, retired, err
+	if started != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), buildStopTimeout)
+		defer cancel()
+		if err := a.closingBuildProviders.close(stopCtx, started); err != nil {
+			return nil, &trackedBuildProviderStopError{cause: errors.Join(startErr, revisionErr, err)}
+		}
+	}
+	if !open {
+		// log-exempt: teardown：关闭项目会撤销被替换的启动，进程清理错误已在上方返回。
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, buildprovider.ErrClosed
+	}
+	if revisionErr == errBuildProviderSourceChanged {
+		return nil, errBuildProviderSourceChanged
+	}
+	if revisionErr != nil {
+		return nil, errors.Join(startErr, revisionErr)
 	}
 	if !current {
-		return nil, retired, errClosing
+		// log-exempt: 预期的缺失：过期启动结果随旧配置一起丢弃，调用方在同一期限内重试。
+		return nil, errBuildProviderSourceChanged
 	}
-	return client, retired, nil
-}
-
-// retire closes a provider that provider replaced, once the requests it already had finished or
-// buildRequestTimeout passed; requests still running then end with the close. It leaves the
-// client alone when a detach took it first and closes it itself. The error reports a provider
-// that outlived the wait or failed to stop.
-func (r *buildRuntime) retire(client *buildprovider.Client) error {
-	drainCtx, cancelDrain := context.WithTimeout(context.Background(), buildRequestTimeout)
-	defer cancelDrain()
-	var failures []error
-	if err := client.Drain(drainCtx); err != nil {
-		failures = append(failures, fmt.Errorf("the replaced build provider still served requests after %s: %w", buildRequestTimeout, err))
+	if matched {
+		// log-exempt: 预期的缺失：同一配置的并发启动已有可复用的进程。
+		return client, nil
 	}
-	r.mu.Lock()
-	_, owned := r.retired[client]
-	delete(r.retired, client)
-	r.mu.Unlock()
-	if !owned {
-		return nil
+	if startErr != nil {
+		return nil, startErr
 	}
-	stopCtx, cancel := context.WithTimeout(context.Background(), buildStopTimeout)
-	defer cancel()
-	if err := client.Close(stopCtx); err != nil {
-		failures = append(failures, err)
-	}
-	return errors.Join(failures...)
+	return nil, errBuildProviderSourceChanged
 }
 
 // buildSettingsKey identifies the plugin settings a provider starts with: the global values and
@@ -530,10 +607,7 @@ func (r *buildRuntime) detach(closing bool) []*buildprovider.Client {
 	for _, provider := range r.shared {
 		clients = append(clients, provider)
 	}
-	for provider := range r.retired {
-		clients = append(clients, provider)
-	}
-	r.providers, r.settings, r.retired, r.shared = nil, nil, nil, nil
+	r.providers, r.launchKeys, r.shared = nil, nil, nil
 	r.detached++
 	if closing {
 		r.closed = true
@@ -553,12 +627,48 @@ func buildStateDirectory(pluginRoot, workspace string, instance buildInstance) s
 // buildProvider starts a provider process, or attaches to the language server
 // that shares it. The caller runs this away from the window thread.
 func (a *App) buildProvider(ctx context.Context, p *project, instance buildInstance) (client *buildprovider.Client, err error) {
-	ctx, finish, err := p.buildSessions.launches.begin(ctx, instance.PluginID)
+	ctx, finish, err := a.buildProviderLaunches.begin(ctx, instance.PluginID)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { finish(err) }()
+	defer func() {
+		var tracked *trackedBuildProviderStopError
+		if errors.As(err, &tracked) {
+			// The launch finished. Uninstall can retry disposal through the workbench.
+			finish(nil)
+			return
+		}
+		finish(err)
+	}()
+	p.buildSessions.mu.Lock()
+	detached := p.buildSessions.detached
+	p.buildSessions.mu.Unlock()
+	const maxSourceAttempts = 3
+	for range maxSourceAttempts {
+		client, err = a.buildProviderWithSources(ctx, p, instance, detached)
+		// log-exempt: 预期的缺失：读取或启动期间工具链来源已更新，在原请求期限内重试。
+		if err == errBuildProviderSourceChanged {
+			continue
+		}
+		return client, err
+	}
+	return nil, toolchain.ErrPinConflict
+}
+
+func (a *App) buildToolchainSource(ctx context.Context, p *project) (toolchain.SourceRevision, error) {
+	revision, err := toolchain.ReadSourceRevision(ctx, a.kernel, p.root, a.globalToolchainRoot(), buildPlatform())
+	if errors.Is(err, configfile.ErrConflict) {
+		return revision, errBuildProviderSourceChanged
+	}
+	return revision, err
+}
+
+func (a *App) buildProviderWithSources(ctx context.Context, p *project, instance buildInstance, detached uint64) (*buildprovider.Client, error) {
 	settings, err := a.loadPluginPreferenceSources(ctx, instance.Manifest, p.root)
+	if err != nil {
+		return nil, err
+	}
+	settingsKey, err := buildSettingsKey(settings.State)
 	if err != nil {
 		return nil, err
 	}
@@ -566,28 +676,12 @@ func (a *App) buildProvider(ctx context.Context, p *project, instance buildInsta
 	if err != nil {
 		return nil, err
 	}
-	client, retired, err := p.buildSessions.provider(ctx, a.plugins.Backend, a.plugins.Root, p.root, rootURI, instance, settings.State, a.pluginLogDirectory)
-	if retired != nil {
-		a.retireBuildProvider(ctx, p, retired)
-	}
+	client, err := a.standaloneBuildProvider(ctx, p, instance, rootURI, settings.State, settingsKey, detached)
 	var shared *pluginbackend.SharedProviderError
 	if !errors.As(err, &shared) {
 		return client, err
 	}
 	return a.sharedBuildProvider(ctx, p, instance, shared.LanguageID)
-}
-
-// retireBuildProvider closes, away from the window thread, a provider its plugin's changed
-// settings replaced, after the requests it already had finished. A failure is logged under the
-// user action whose request (ctx) replaced it.
-func (a *App) retireBuildProvider(ctx context.Context, p *project, client *buildprovider.Client) {
-	a.tasks.running.Add(1)
-	go func() {
-		defer a.tasks.running.Done()
-		if err := p.buildSessions.retire(client); err != nil {
-			a.backgroundFailedIn(ctx, "build_provider_restart", err)
-		}
-	}()
 }
 
 // sharedBuildProvider attaches a build client to the language server of the
@@ -619,10 +713,11 @@ func (a *App) sharedBuildProvider(ctx context.Context, p *project, instance buil
 		return nil, err
 	}
 	session, err := a.plugins.StartLanguageServer(ctx, entries, languageID, pluginservice.BackendRequest{
-		RootURI:          rootURI,
-		WorkingDirectory: p.root,
-		Context:          p.pluginContext,
-		Architecture:     core.PluginArchitecture(),
+		RootURI:            rootURI,
+		WorkingDirectory:   p.root,
+		Context:            p.pluginContext,
+		Architecture:       core.PluginArchitecture(),
+		ProjectCodeAllowed: p.trust.allowed(),
 	})
 	if err != nil {
 		return nil, err
@@ -706,6 +801,14 @@ func (a *App) loadBuildSystems(p *project) {
 	if p == nil || p.build.loading {
 		return
 	}
+	if p.remote != nil {
+		// log-exempt: 远程工作区的构建工具要在主机上运行，现在还不支持：本机的占位文件夹里没有项目，不探测构建系统；
+		// 运行配置菜单用 failed 说明这一点，内置的程序和脚本运行照常从 Core 读出、在主机上启动（remote_run.go）。
+		p.build.loaded = true
+		p.build.failed = i18n.Shared(a.language(), "desktop.run.remote.buildTools")
+		a.refreshRunConfigurations(p)
+		return
+	}
 	if a.plugins == nil || a.plugins.Backend == nil {
 		p.build.loaded = true
 		p.build.failed = a.text.Build.PluginsUnavailable
@@ -756,6 +859,8 @@ func (a *App) loadBuildSystems(p *project) {
 				Manifest:         plugin.Manifest,
 				PackageDirectory: plugin.Directory,
 				System:           system,
+				// Core projects workspace tasks from an empty model without starting a tool.
+				modelLoaded: detected.ModelSource == "",
 			}
 			if len(detected.Model) != 0 && string(detected.Model) != "null" {
 				if err := json.Unmarshal(detected.Model, &instance.Model); err == nil {
@@ -783,6 +888,7 @@ func (a *App) finishBuildDetection(p *project, generation uint64, instances []bu
 	}
 	p.build.loaded = true
 	p.build.instances = instances
+	a.publishWorkspaceBuildOptions(p)
 	p.revokeAllBuildTests()
 	if p.build.selected >= len(instances) {
 		p.build.selected = 0
@@ -863,21 +969,26 @@ func (a *App) reloadBuildModel(p *project, index int) {
 		return
 	}
 	instance := &p.build.instances[index]
-	instance.modelLoaded, instance.modelError, instance.modelStopped = false, "", false
 	p.reloadBuildDependencies()
 	p.revokeBuildTests(instance.ID)
+	if instance.ModelSource == "" {
+		return
+	}
+	instance.modelLoaded, instance.modelError, instance.modelStopped = false, "", false
 	a.loadBuildModelWith(p, index, true)
 }
 
-// buildModel loads instance's model from the source Core named for it at detection: a command
-// the host runs, or the plugin's provider process. A system that declares a provider process may
-// still read its model with a command, so the model's source decides, not the provider. resolved,
-// when given, is the build executable the caller already resolved.
+// buildModel loads the model from the source Core named at detection. A build system without a
+// model contributes only its declaration. resolved, when supplied, is the caller's build executable.
 func (a *App) buildModel(ctx context.Context, p *project, instance buildInstance, kernel Kernel, feed *buildSyncFeed, messages i18n.BuildMessages, refresh bool, resolved ...buildExecution) (core.BuildModel, error) {
-	if instance.ModelSource == "command" {
+	switch instance.ModelSource {
+	case "":
+		return core.BuildModel{}, nil
+	case "command":
 		return a.commandModel(ctx, p, instance, kernel, feed, messages, resolved...)
+	default:
+		return a.providerModel(ctx, p, instance, kernel, feed, refresh, resolved...)
 	}
-	return a.providerModel(ctx, p, instance, kernel, feed, refresh, resolved...)
 }
 
 // commandModel runs a command-sourced model plan and decodes its output. The
@@ -1258,7 +1369,11 @@ func buildTaskSelection(instance *buildInstance, task *pluginservice.BuildTaskDe
 // so a tool call can report them, and the Build window keeps its notification and ignores them.
 func (a *App) runBuildTask(p *project, projectID, targetID, taskID string, userArguments []string) (*buildOperation, error) {
 	// A task runs the build tool on the project: in safe mode the user is asked to trust it
-	// first, and the task starts once trusted. The caller, such as the IDE API, is refused.
+	// first, and the task starts once trusted. The caller, such as the IDE API, is refused. A
+	// remote workspace's build tool runs on its host, which a task does not reach yet.
+	if a.refuseRemote(p, "build_task") {
+		return nil, refuseBuild(refusalNotReady, "the workspace is remote")
+	}
 	if p.safeMode() {
 		a.askToTrustProject(p, func() { _, _ = a.runBuildTask(p, projectID, targetID, taskID, userArguments) })
 		return nil, refuseBuild(refusalNotReady, "the workspace is not trusted")
@@ -1319,6 +1434,7 @@ func (a *App) runBuildTask(p *project, projectID, targetID, taskID string, userA
 	op := a.beginBuildOperation(p, "build", ideAPIBuildLabel(instance, taskID), "", restartWithInstance(instance.ID, func(a *App, p *project) {
 		_, _ = a.runBuildTask(p, projectID, targetID, taskID, userArguments)
 	}))
+	setRunGroupFromInstance(p, op.session, instance)
 	a.background(p, buildRequestTimeout, func(ctx context.Context) func(*App) {
 		prepare, release := op.bind(ctx)
 		defer release()
@@ -1660,6 +1776,18 @@ func (a *App) runBuildEntry(p *project, entryID string) {
 	if instance == nil {
 		return
 	}
+	for index := range instance.Model.Run {
+		entry := &instance.Model.Run[index]
+		if entry.ID == entryID && entry.RunType != nil {
+			if id, ok := p.generatedRunTypeConfigurationID(*entry); ok {
+				a.runConfiguration(p, id)
+				return
+			}
+			a.operationRejected("build_run_entry", "target_missing")
+			a.notifyError(a.text.Build.TargetMissing)
+			return
+		}
+	}
 	instanceID := instance.ID
 	a.startRun(p, "entry:"+instanceID+"/"+entryID, func(a *App, p *project) { a.startBuildEntry(p, instanceID, entryID) })
 }
@@ -1693,6 +1821,7 @@ func (a *App) startBuildEntry(p *project, instanceID, entryID string) {
 	op := a.beginRunOperation(p, entry.Name, "", "entry:"+instanceID+"/"+entryID, restartWithInstance(instance.ID, func(a *App, p *project) {
 		a.runBuildEntry(p, entryID)
 	}))
+	setRunGroupFromInstance(p, op.session, instance)
 	a.background(p, 0, func(ctx context.Context) func(*App) {
 		bounded, cancel := context.WithTimeout(ctx, runPreparationTimeout)
 		defer cancel()
@@ -1760,6 +1889,7 @@ func (a *App) beginBuildTarget(p *project, key, targetID string, run pluginservi
 		}
 		a.runBuildTarget(p, targetID, runID)
 	}))
+	setRunGroupFromInstance(p, op.session, instance)
 	var options *core.RunLaunchOptions
 	if (run.Execution != "" && run.Execution != "application") || debug != nil {
 		options = &core.RunLaunchOptions{Execution: run.Execution, RuntimeArguments: []string{}, Arguments: []string{}, Environment: map[string]string{}}
@@ -1895,9 +2025,11 @@ func (a *App) redebugProviderTarget(p *project, reference core.RunProviderRefere
 
 // buildRunDeclaration is the run declaration id of system.
 func buildRunDeclaration(system pluginservice.BuildSystemDeclaration, id string) (pluginservice.BuildRunDeclaration, bool) {
-	for _, run := range system.Runs {
-		if run.ID == id {
-			return run, true
+	for _, runs := range [][]pluginservice.BuildRunDeclaration{system.Runs, system.EntrypointRuns} {
+		for _, run := range runs {
+			if run.ID == id {
+				return run, true
+			}
 		}
 	}
 	return pluginservice.BuildRunDeclaration{}, false
@@ -2159,6 +2291,7 @@ func (a *App) endBuildSession(op *buildOperation, state, status string) {
 	if session == nil || !session.running {
 		return
 	}
+	stopRunPortSampling(session)
 	session.output.seal()
 	session.running, session.operation, session.ended, session.summary = false, nil, a.now(), status
 	switch state {
@@ -2194,7 +2327,8 @@ func (a *App) finishBuildTask(p *project, op *buildOperation, result json.RawMes
 // that exited is summarized with its exit code, as a run a plugin reports is, not as a build.
 func (a *App) finishBuildRun(p *project, op *buildOperation, err error) {
 	a.endServiceDebugSession(p, op)
-	var exit *exec.ExitError
+	// A local process's *exec.ExitError and a host process's remoteRunExit both carry the code.
+	var exit interface{ ExitCode() int }
 	switch {
 	case op.cancelled:
 		a.endBuildOperation(p, op, "cancelled", nil, "", a.text.Build.Cancelled)
@@ -2225,7 +2359,8 @@ func (a *App) finishBuildError(p *project, op *buildOperation, err error) {
 		failure = message
 	}
 	if a.endBuildOperation(p, op, "failed", nil, failure, message) {
-		a.operationFailed("build", err)
+		// A remote workspace's reason may name the host or a host path, which the log does not keep.
+		a.operationFailed("build", p.logError(err))
 	}
 }
 
@@ -2289,11 +2424,17 @@ func (a *App) stopBuildSessions(p *project, closing bool) {
 		a.endBuildSession(operation, "cancelled", a.text.Build.Cancelled)
 		operation.ide.settle("cancelled", nil, operation.session.output.sequence, "")
 	}
-	clients := p.buildSessions.detach(closing)
+	for _, client := range p.buildSessions.detach(closing) {
+		a.closingBuildProviders.add(p.ctx, client)
+	}
+	clients := a.closingBuildProviders.snapshot(func(_ *buildprovider.Client, owner context.Context) bool {
+		return owner == p.ctx
+	})
+	origin := a.operationContext(context.Background())
 	a.tasks.running.Add(1)
 	go func() {
 		defer a.tasks.running.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), buildStopTimeout)
+		ctx, cancel := context.WithTimeout(origin, buildStopTimeout)
 		defer cancel()
 		for _, operation := range operations {
 			if operation.request != nil && operation.provider != nil {
@@ -2302,7 +2443,9 @@ func (a *App) stopBuildSessions(p *project, closing bool) {
 			}
 		}
 		for _, client := range clients {
-			_ = client.Close(ctx)
+			if err := a.closingBuildProviders.close(ctx, client); err != nil {
+				a.backgroundFailedIn(ctx, "build_provider_stop", err)
+			}
 		}
 	}()
 }

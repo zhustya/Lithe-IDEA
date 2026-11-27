@@ -7,6 +7,8 @@ import (
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 	"github.com/vivaui/viva/gfx"
 )
 
@@ -110,11 +112,22 @@ func TestRunConsoleWrapSwitchBreaksLongLinesInsteadOfCuttingThem(t *testing.T) {
 	if hit := h.pageHit(wrap); hit.Role != gfx.RoleSwitch || hit.Checked {
 		t.Fatalf("the wrap switch is %+v, want an unchecked switch", hit)
 	}
-	// Unwrapped, the long line ends in an ellipsis at the console's edge.
-	if h.shows("finish") || !h.shows("…") || !h.shows("short line") {
-		t.Fatal("an unwrapped long line is not cut with an ellipsis at the console's edge")
+	// Unwrapped, the long line scrolls horizontally instead of being truncated with an ellipsis.
+	if h.shows("…") || !h.shows("short line") {
+		t.Fatal("an unwrapped long line should not be cut with an ellipsis")
 	}
 	unwrapped := labelsHolding(h, "word")
+
+	// Horizontal wheel scrolling reaches the end of the long line.
+	consoleHit := h.pageHit(h.app.text.Build.Output)
+	pt := center(consoleHit.Bounds)
+	if err := h.driver.Scroll(gfx.ScrollEvent{X: pt.X, Y: pt.Y, DeltaX: 10000, Precise: true}); err != nil {
+		t.Fatal(err)
+	}
+	h.settle()
+	if !h.shows("finish") {
+		t.Fatal("horizontal scrolling did not reveal the end of the unwrapped long line")
+	}
 
 	h.clickNamed(wrap)
 	h.settle()
@@ -130,8 +143,141 @@ func TestRunConsoleWrapSwitchBreaksLongLinesInsteadOfCuttingThem(t *testing.T) {
 
 	h.clickNamed(wrap)
 	h.settle()
-	if h.app.runWrap || h.shows("finish") || !h.shows("…") {
-		t.Fatal("a second click did not cut the long line again")
+	if h.app.runWrap || h.shows("…") {
+		t.Fatal("a second click did not turn wrap back off cleanly")
+	}
+}
+
+func TestRunPerformanceCollapseKeepsSummaryAndPersistsTheChoice(t *testing.T) {
+	opts := debugPluginOptions(t, "dev.lithe.test.output-links", outputLinkManifest, false, &testKernel{Client: core.NewClient()}, "dark")
+	h := newHarnessWithOptions(t, opts)
+	root := t.TempDir()
+	h.open(root)
+	h.app.reduceChrome(core.ToggleChrome(itemRun))
+	h.startRunConsole(root, "a running process emitted this line\n")
+	p := h.app.project
+	if len(p.build.runs) != 1 {
+		t.Fatalf("runs = %d, want one", len(p.build.runs))
+	}
+	run := p.build.runs[0]
+	run.addSample(pluginservice.ProcessSample{CPUPercent: 12, MemoryBytes: 64 << 20})
+	run.addSample(pluginservice.ProcessSample{CPUPercent: 25, MemoryBytes: 96 << 20})
+	h.app.invalidator.Invalidate()
+	for range 6 {
+		h.settle()
+	}
+	collapse := i18n.Shared(h.app.language(), "native.collapseSection")
+	expand := i18n.Shared(h.app.language(), "native.expandSection")
+	if !h.shows(h.app.text.Run.Performance.CPU("25")) || !h.shows(h.app.text.Run.Performance.Memory("96")) {
+		t.Fatal("resource values are not visible while the graph is expanded")
+	}
+	expandedHit := h.pageHit(collapse)
+	if expandedHit.Role != gfx.RoleButton || !expandedHit.Expandable || !expandedHit.Expanded {
+		t.Fatalf("collapse control = %+v, want an expanded button", expandedHit)
+	}
+	h.click(center(expandedHit.Bounds))
+	h.settle()
+	if !h.app.settings.RunPerformanceCollapsed {
+		t.Fatal("the graph did not collapse")
+	}
+	collapsedHit := h.pageHit(expand)
+	if collapsedHit.Role != gfx.RoleButton || !collapsedHit.Expandable || collapsedHit.Expanded {
+		t.Fatalf("expand control = %+v, want a collapsed button", collapsedHit)
+	}
+	if collapsedHit.ID != expandedHit.ID {
+		t.Fatalf("toggle button ID changed on collapse: %v -> %v", expandedHit.ID, collapsedHit.ID)
+	}
+	if collapsedHit.Bounds.Y >= expandedHit.Bounds.Y-runChartHeight+1 {
+		t.Fatalf("summary row Y stayed at %v (was %v), want chart row (%dpx) collapsed", collapsedHit.Bounds.Y, expandedHit.Bounds.Y, runChartHeight)
+	}
+	if !h.shows(h.app.text.Run.Performance.CPU("25")) || !h.shows(h.app.text.Run.Performance.Memory("96")) || !h.shows("a running process emitted this line") {
+		t.Fatal("collapsing hid the summary or output")
+	}
+	var savedCollapsed settings
+	if _, err := h.store.Load(settingsFile, &savedCollapsed); err != nil || !savedCollapsed.RunPerformanceCollapsed {
+		t.Fatalf("collapse preference was not saved: %+v, err=%v", savedCollapsed, err)
+	}
+
+	// Grouped executions share the collapsed preference while keeping their own samples.
+	h.app.applyRunEvent(pluginservice.RunEvent{Type: pluginservice.RunStarted, RunID: "run-second", PluginID: "dev.lithe.test.output-links", Label: "Second run", Workspace: root})
+	h.settle()
+	if len(p.build.runs) != 2 {
+		t.Fatalf("runs = %d, want two", len(p.build.runs))
+	}
+	second := p.build.runs[1]
+	second.addSample(pluginservice.ProcessSample{CPUPercent: 70, MemoryBytes: 128 << 20})
+	h.app.invalidator.Invalidate()
+	h.settle()
+	if hit := h.pageHit(expand); hit.Expanded {
+		t.Fatalf("second run did not share the collapsed preference: %+v", hit)
+	}
+	if !h.shows(h.app.text.Run.Performance.CPU("70")) || !h.shows(h.app.text.Run.Performance.Memory("128")) {
+		t.Fatal("second run does not show its own resource summary")
+	}
+	firstNode := h.pageHit(run.label + ", " + h.app.runStatusText(run))
+	h.click(center(firstNode.Bounds))
+	h.settle()
+	if p.activeRun() != run {
+		t.Fatal("the execution tree did not select the first run")
+	}
+	if !h.shows(h.app.text.Run.Performance.CPU("25")) || !h.shows(h.app.text.Run.Performance.Memory("96")) {
+		t.Fatal("switching back did not preserve the first run's samples")
+	}
+
+	// Reopening the workbench restores the collapsed preference from settings.json, and
+	// expanding via keyboard preserves focus on the toggle button and writes false back.
+	reopenOpts := opts
+	reopenOpts.Kernel = &testKernel{Client: core.NewClient()}
+	reopenOpts.PluginKernel = &testKernel{Client: core.NewClient()}
+	reopenOpts.Store = store.At(h.store.Dir())
+	reopened := newHarnessWithOptions(t, reopenOpts)
+	if !reopened.app.settings.RunPerformanceCollapsed {
+		t.Fatal("reopened workbench did not restore RunPerformanceCollapsed")
+	}
+	reopened.open(root)
+	reopened.app.reduceChrome(core.ToggleChrome(itemRun))
+	reopened.startRunConsole(root, "reopened output line\n")
+	reopenedRun := reopened.app.project.build.runs[0]
+	reopenedRun.addSample(pluginservice.ProcessSample{CPUPercent: 15, MemoryBytes: 48 << 20})
+	reopenedRun.addSample(pluginservice.ProcessSample{CPUPercent: 30, MemoryBytes: 80 << 20})
+	reopened.app.invalidator.Invalidate()
+	for range 6 {
+		reopened.settle()
+	}
+	reopenedCollapsedHit := reopened.pageHit(expand)
+	if reopenedCollapsedHit.Expanded {
+		t.Fatalf("reopened run chart started expanded: %+v", reopenedCollapsedHit)
+	}
+	reopened.click(center(reopened.pageHit(reopenedRun.label + ", " + reopened.app.runStatusText(reopenedRun)).Bounds))
+	reopened.settle()
+	for range 40 {
+		if reopened.focusedName() == expand {
+			break
+		}
+		if err := reopened.driver.Key(gfx.KeyTab, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := reopened.focusedName(); got != expand {
+		t.Fatalf("Tab did not reach %q; focus is on %q", expand, got)
+	}
+	if err := reopened.driver.Key(gfx.KeySpace, 0); err != nil {
+		t.Fatal(err)
+	}
+	reopened.settle()
+	if reopened.app.settings.RunPerformanceCollapsed {
+		t.Fatal("the graph did not expand on Space")
+	}
+	reopenedExpandedHit := reopened.pageHit(collapse)
+	if !reopenedExpandedHit.Expanded || reopenedExpandedHit.Bounds.Y <= reopenedCollapsedHit.Bounds.Y+runChartHeight-1 {
+		t.Fatalf("expanded control = %+v (was Y=%v), want chart restored", reopenedExpandedHit, reopenedCollapsedHit.Bounds.Y)
+	}
+	if got := reopened.driver.Snapshot().Focused; got != reopenedExpandedHit.ID {
+		t.Fatalf("keyboard focus moved after expanding: got %v, want %v", got, reopenedExpandedHit.ID)
+	}
+	var savedExpanded settings
+	if _, err := reopened.store.Load(settingsFile, &savedExpanded); err != nil || savedExpanded.RunPerformanceCollapsed {
+		t.Fatalf("expansion preference was not saved: %+v, err=%v", savedExpanded, err)
 	}
 }
 

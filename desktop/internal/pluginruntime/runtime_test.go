@@ -369,7 +369,8 @@ func TestChecksumFailureAndCancelledValidationNeverPublish(t *testing.T) {
 	artifact := selected(body, "tar.gz", "1")
 	manager, _ := testManager(t, map[string][]byte{artifact.URL: []byte("damaged download")})
 	ctx := testContext(t)
-	if _, err := manager.Prepare(ctx, artifact, validateBody("working"), nil); !errors.Is(err, marketplace.ErrArchiveChecksum) {
+	// A download that never delivered the pinned bytes says so, with the transfer's own cause.
+	if _, err := manager.Prepare(ctx, artifact, validateBody("working"), nil); !errors.Is(err, ErrDownload) || !errors.Is(err, marketplace.ErrArchiveChecksum) {
 		t.Fatalf("checksum failure = %v", err)
 	}
 	manager, _ = testManager(t, map[string][]byte{artifact.URL: body})
@@ -475,5 +476,27 @@ func TestCancelledTransferLeavesNoCompleteOrPartialGeneration(t *testing.T) {
 		if entry.Name() != ".lock" {
 			t.Fatalf("cancelled transfer left unverified data: %s", entry.Name())
 		}
+	}
+}
+
+func TestPrepareCleansAbandonedAtomicArchiveTemps(t *testing.T) {
+	body := tarArchive(t, member{name: "distribution/bin/worker", body: "working", mode: 0o755})
+	artifact := selected(body, "tar.gz", "1")
+	manager, _ := testManager(t, map[string][]byte{artifact.URL: body})
+	base := filepath.Join(manager.Root, artifact.CacheKey)
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	abandoned := filepath.Join(base, ".archive.crashed-attempt")
+	if err := os.WriteFile(abandoned, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := testContext(t)
+	installed, err := manager.Prepare(ctx, artifact, validateBody("working"), nil)
+	if err != nil || installed.Executable == "" {
+		t.Fatalf("prepare after crash = %+v, %v", installed, err)
+	}
+	if _, err := os.Stat(abandoned); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("abandoned archive temp remained: %v", err)
 	}
 }

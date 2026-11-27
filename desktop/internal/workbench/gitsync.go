@@ -153,7 +153,8 @@ func (a *App) runSyncAt(p *project, root, operation, label string, failed func(r
 		defer stop()
 		defer context.AfterFunc(op, stop)()
 		ctx = core.WithGitProgress(ctx, func(progress core.GitProgress) { a.postSyncProgress(p, relay, progress) })
-		done, err := work(ctx, kernel, root)
+		// Every sync is one the user started, so its transfer may ask for credentials.
+		done, err := work(a.gitAuthentication(ctx), kernel, root)
 		readCtx, readCancel := context.WithTimeout(p.ctx, gitTimeout)
 		defer readCancel()
 		generation := p.gitStatusGeneration.Add(1)
@@ -296,7 +297,11 @@ func (a *App) submitFetchOptions(p *project) {
 // updateCurrentBranch fetches, then brings the branch checked out in the repository the log
 // walks up to its upstream, see updateCurrentBranchAt.
 func (a *App) updateCurrentBranch(p *project, surface actionSurface) {
-	a.updateCurrentBranchAt(p, p.logRepositoryRoot(), p.log.current, surface)
+	branch := p.log.current
+	if branch == "" {
+		branch = p.git.branch()
+	}
+	a.updateCurrentBranchAt(p, p.logRepositoryRoot(), branch, surface)
 }
 
 // updateCurrentBranchAt fetches, then brings branch, the one checked out in the repository at

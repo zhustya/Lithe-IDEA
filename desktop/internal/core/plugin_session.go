@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"runtime"
 )
 
@@ -60,9 +61,10 @@ var EditorHost = EditorHostOptions{
 	ActionIcons: []string{
 		"run", "run-all", "debug", "test", "test-passed", "test-failed", "test-skipped",
 		"navigate-super", "navigate-implementations",
+		"navigate-implemented", "navigate-implementing", "navigate-overridden", "navigate-overriding",
 	},
 	ActionSourceBytes: 1024 * 1024,
-	ProviderTypes:     []string{"definition", "hover", "completion", "codeLens", "semanticTokens", "documentLink"},
+	ProviderTypes:     []string{"definition", "hover", "completion", "codeLens", "semanticTokens", "colorDecorations", "documentLink"},
 }
 
 // EditorActionDecodeVersion is the plugins.editorActions.decode request version EditorHost is
@@ -150,6 +152,24 @@ type PluginBackendDirectories struct {
 	Architecture            string                     `json:"architecture"`
 	Settings                map[string]json.RawMessage `json:"settings,omitempty"`
 	ProjectSettings         map[string]json.RawMessage `json:"projectSettings,omitempty"`
+	// ProjectCodeAllowed is whether the user trusts the workspace. Core plans no language
+	// server, build provider process or VCS provider that would run project code without it,
+	// and refuses them with LaunchUntrustedWorkspace. A plugin backend and a debug adapter of
+	// its own process are not refused; an adapter hosted in a language server is that
+	// server's launch, refused as the server is.
+	ProjectCodeAllowed bool `json:"projectCodeAllowed,omitempty"`
+}
+
+// LaunchUntrustedWorkspace is the code Core refuses a launch plan with when the process
+// would run project code and the workspace is not trusted. The host leaves the process
+// stopped and starts it once the user trusts the workspace.
+const LaunchUntrustedWorkspace = "plugin.launch.untrustedWorkspace"
+
+// IsLaunchUntrustedWorkspace reports whether err is Core's refusal of a launch for want of
+// workspace trust.
+func IsLaunchUntrustedWorkspace(err error) bool {
+	var rejection *MarketplaceRejection
+	return errors.As(err, &rejection) && rejection.Code == LaunchUntrustedWorkspace
 }
 
 // PluginArchitecture is this host's CPU in the plugin contract's names, which

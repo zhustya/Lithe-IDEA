@@ -74,9 +74,9 @@ func TestDeclaredServesTheBaselineOfEveryWiredCapability(t *testing.T) {
 		if name == "sourceSettings" {
 			wanted = []int{0, 1}
 		}
-		// The Build test tree supports the discovery command version 1 adds.
+		// Version 1 adds test discovery, and version 2 adds registry attach for provider applications.
 		if name == "buildSystems" {
-			wanted = []int{0, 1}
+			wanted = []int{0, 1, 2}
 		}
 		// Run on Current File starts the entrypoint runs version 1 adds.
 		if name == "buildProviders" {
@@ -89,6 +89,14 @@ func TestDeclaredServesTheBaselineOfEveryWiredCapability(t *testing.T) {
 		}
 		// Managed runtime artifacts can use the mirror URLs version 1 adds.
 		if name == "managedRuntimes" {
+			wanted = []int{0, 1}
+		}
+		// Plugin management installs the pinned archive downloads version 1 adds.
+		if name == "commandInstallers" {
+			wanted = []int{0, 1}
+		}
+		// Safe mode starts the servers that declare the executesProjectCode version 1 adds as false.
+		if name == "languageServers" {
 			wanted = []int{0, 1}
 		}
 		if versions := declared[name]; !slices.Equal(versions, wanted) {

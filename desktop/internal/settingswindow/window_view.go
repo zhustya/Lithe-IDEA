@@ -7,7 +7,6 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/fontprefs"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/icons"
-	"github.com/vivaui/viva/app"
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
 )
@@ -34,8 +33,8 @@ func (w *window) view(c ui.C) {
 		w.footer(c)
 	})
 	w.keymapImportDialog(c)
-	w.pluginInstallModal(c.Part("plugin-install"))
-	w.commandInstallModal(c.Part("command-install"))
+	w.pluginInstallModal(c)
+	w.commandInstallModal(c)
 	w.declareWork(c)
 	w.endRegion()
 }
@@ -77,7 +76,7 @@ func (w *window) keys(c ui.C) {
 
 // title keeps the native window title beside the system controls.
 func (w *window) title(c ui.C) {
-	leading, trailing := app.TitlebarInsets()
+	leading, trailing := c.TitlebarInsets()
 	ui.Stack(c).FillWidth().Height(titleHeight).Shrink(0).Background(w.pal.titleBar).MovesWindow().Children(func() {
 		ui.Row(c).Fill().PadSides(0, max(8, trailing), 0, max(80, leading+10)).Items(ui.Center).Children(func() {
 			ui.Text(c, w.text.Settings.Title).FontSize(13).Weight(gfx.WeightSemibold).Color(w.pal.text).Ellipsis()
@@ -85,13 +84,15 @@ func (w *window) title(c ui.C) {
 	})
 }
 
-// sidebar is the column at the leading side: the search field above the list of pages.
+// sidebar is the column at the leading side: the search field above the list of pages. A
+// page name it cuts short shows in full to its right, over the page beside it.
 func (w *window) sidebar(c ui.C) {
 	p := &w.pal
 	settings := &w.text.Settings
-	ui.Column(c).Width(sidebarWidth).FillHeight().Shrink(0).Background(p.sidebar).Clip().Children(func() {
+	ui.Column(c).Width(sidebarWidth).FillHeight().Shrink(0).Background(p.sidebar).Clip().
+		EllipsisTooltipOn(ui.TooltipRight).Children(func() {
 		ui.Row(c).FillWidth().Shrink(0).PadSides(10, 10, 8, 10).Children(func() {
-			search := ui.TextFieldID(c, searchID, &w.searchField, settings.Search, settings.Search).Icon(icons.Search).FillWidth().Height(searchHeight)
+			search := ui.TextField(c, &w.searchField, settings.Search, settings.Search, ui.WithID(searchID)).Icon(icons.Search).FillWidth().Height(searchHeight)
 			if w.searchField.Text() != "" {
 				search = search.Action(icons.X, i18n.Shared(w.marketLanguage(), "desktop.logs.clearSearch"))
 				if search.ActionClicked() {
@@ -128,8 +129,8 @@ func (w *window) sidebar(c ui.C) {
 }
 
 // chooseRow opens what row r stands for. A group without a page of its own folds; one with a
-// page, which Build is and plugins' pages make any entry they are under, opens it, and Build
-// lists its pages as it opens. A kind's row opens the kind's page. A search ends once its row
+// page, which Version Control, Build and Languages & Frameworks are and plugins' pages make
+// any entry they are under, opens it, and a group that owns its page lists its pages as it opens. A kind's row opens the kind's page. A search ends once its row
 // is chosen, with the rows above the page opened so the page's row is on the screen.
 func (w *window) chooseRow(r row) {
 	if w.chooseSearchRow(r) {
@@ -143,8 +144,8 @@ func (w *window) chooseRow(r row) {
 		w.toggleRow(r)
 		return
 	default:
-		if r.page == pageBuild {
-			w.sess.open[pageBuild] = true
+		if ownsPage(r.page) {
+			w.sess.open[r.page] = true
 		}
 		w.selectSettingsPage(r.page, r.dynamic)
 	}
@@ -308,7 +309,8 @@ func (w *window) navContent(c ui.C, i int) {
 }
 
 // navTrailing ends a row as the prototype does: Build folded and the Toolchains page count the
-// tools with a problem, the Debuggers page marks drafts and a kind counts its pages.
+// tools with a problem, the Debuggers, Trusted Locations and Remote Workspace pages mark drafts and
+// a kind counts its pages.
 func (w *window) navTrailing(c ui.C, r row) {
 	if r.dynamic != "" {
 		return
@@ -322,6 +324,14 @@ func (w *window) navTrailing(c ui.C, r row) {
 		}
 	case r.page == pageDebuggers:
 		if len(w.steppingPending()) > 0 {
+			dot(c, 7, w.bp.accent)
+		}
+	case r.page == pageTrustedLocations:
+		if w.toolchains.locations.drafts() > 0 || w.toolchains.remote.drafts() > 0 {
+			dot(c, 7, w.bp.accent)
+		}
+	case r.page == pageRemoteWorkspace:
+		if w.toolchains.prefs.drafts() > 0 {
 			dot(c, 7, w.bp.accent)
 		}
 	}
@@ -338,9 +348,16 @@ func (w *window) toolchainProblems() int {
 
 // content is the page beside the sidebar: the breadcrumb above the page itself.
 func (w *window) content(c ui.C) {
+	if w.sess.page != pagePlugins {
+		w.marketIcons.reset(0)
+	}
 	if w.sess.page != pagePlugins && w.market.status == marketLoading {
-		// Leaving the page stops wanting the fetch, which cancels it.
+		// Leaving the page stops wanting the fetch, which cancels it. A background refresh
+		// goes on: its result replaces plugins the page already shows.
 		w.market.close()
+	}
+	if w.sess.page != pagePlugins && w.marketShown {
+		w.marketShown, w.marketRecheck = false, true
 	}
 	if w.sess.page != pageAbout {
 		w.about = aboutState{}
@@ -368,12 +385,18 @@ func (w *window) content(c ui.C) {
 			w.fontsPage(c)
 		case w.sess.page == pageBuild:
 			w.buildPage(c.Part("build"))
+		case w.sess.page == pageLanguages:
+			w.languagesPage(c.Part("languages"))
 		case w.sess.page == pageToolchains:
 			w.toolchainsPage(c)
 		case w.sess.page == pageDebuggers:
 			w.debuggersPage(c)
 		case w.sess.page == pageConsole:
 			w.consolePage(c)
+		case w.sess.page == pageTrustedLocations && (w.toolchains.locations.available() || w.toolchains.remote.available()):
+			w.trustedLocationsPage(c)
+		case w.sess.page == pageRemoteWorkspace && w.toolchains.prefs.available():
+			w.remoteWorkspacePage(c)
 		case w.sess.page == pageTerminal && w.ctrl.opts.TerminalShells != nil:
 			w.terminalPage(c)
 		case w.sess.page == pageSearch:
@@ -381,7 +404,9 @@ func (w *window) content(c ui.C) {
 		case w.sess.page == pageAIGeneration:
 			w.generationPage(c)
 		case w.sess.page == pageVersionControl:
-			w.versionControlPage(c)
+			w.versionControlPage(c.Part("versionControl"))
+		case w.sess.page == pageGit:
+			w.gitPage(c)
 		case w.sess.page == pageNetwork && w.ctrl.opts.SetNetwork != nil:
 			w.networkPage(c)
 		case w.sess.page == pageKeymap:
@@ -400,33 +425,33 @@ func (w *window) content(c ui.C) {
 
 // breadcrumb is the prototype's .crumb: where the open page is, its group first and the page
 // last in the weight of the text. A title before the last that has a page of its own opens it:
-// Build, Execution, Deployment its directory.
+// Build, Execution, Deployment and Languages & Frameworks their directories.
 func (w *window) breadcrumb(c ui.C) {
 	b := &w.bp
 	w.crumbs = w.appendCrumbs(w.crumbs[:0])
 	var chosen *crumb
 	ui.Row(c).FillWidth().Height(crumbHeight).Shrink(0).PadX(18).Gap(8).Items(ui.Center).Background(b.surface).Children(func() {
+		// Keys belong on interactive containers, not leaf Text elements.
 		for i := range w.crumbs {
 			crumb := &w.crumbs[i]
-			k := c.KeyInt(i)
 			if i > 0 {
-				ui.Text(k.Part("sep"), "›").FontSize(buildFont).Color(b.faint).Shrink(0)
+				ui.Text(c, "›").FontSize(buildFont).Color(b.faint).Shrink(0)
 			}
 			last := i == len(w.crumbs)-1
 			switch {
 			case last:
-				ui.Text(k, crumb.title).FontSize(buildFont).Weight(gfx.WeightSemibold).Color(b.text).Shrink(1).MinWidth(0).Ellipsis()
+				ui.Text(c, crumb.title).FontSize(buildFont).Weight(gfx.WeightSemibold).Color(b.text).Shrink(1).MinWidth(0).Ellipsis()
 			case crumb.link:
-				button := ui.ButtonBase(k, crumb.title).Shrink(1).MinWidth(0).Items(ui.Center)
+				button := ui.ButtonBase(c.KeyInt(i), crumb.title).Shrink(1).MinWidth(0).Items(ui.Center)
 				if button.Clicked() {
 					chosen = crumb
 				}
 				button.Children(func() {
-					ui.Text(k, crumb.title).FontSize(buildFont).Color(b.sub).Shrink(1).MinWidth(0).Ellipsis().
+					ui.Text(c, crumb.title).FontSize(buildFont).Color(b.sub).Shrink(1).MinWidth(0).Ellipsis().
 						StateFrom(button).Hover(ui.Look{}.Color(b.accent))
 				})
 			default:
-				ui.Text(k, crumb.title).FontSize(buildFont).Color(b.sub).Shrink(1).MinWidth(0).Ellipsis()
+				ui.Text(c, crumb.title).FontSize(buildFont).Color(b.sub).Shrink(1).MinWidth(0).Ellipsis()
 			}
 		}
 	})
@@ -460,8 +485,8 @@ func (w *window) appendCrumbs(dst []crumb) []crumb {
 
 // chooseCrumb opens the page a title of the breadcrumb stands for.
 func (w *window) chooseCrumb(crumb crumb) {
-	if crumb.page == pageBuild {
-		w.sess.open[pageBuild] = true
+	if ownsPage(crumb.page) {
+		w.sess.open[crumb.page] = true
 	}
 	w.selectSettingsPage(crumb.page, "")
 }
@@ -565,9 +590,11 @@ func (w *window) generalPage(c ui.C) {
 	w.themePick = w.sess.values.Theme
 	w.languagePick = languageCode(languageIndex(w.sess.values.Language))
 	w.pageScroll(c, pageGeneral, func() {
+		w.cliCard(c)
+		w.associationsCard(c)
 		w.card(c, settings.Appearance, settings.AppearanceHelp, func() {
 			choice := func() {
-				ui.Choice(c, &w.themePick, themeValues[:], w.themeLabel).Width(420).Shrink(1).MinWidth(0).Label(settings.AppearanceMode)
+				ui.Choice(c, &w.themePick, themeValues[:], w.themeLabel).Width(420).Shrink(1).MinWidth(0)
 			}
 			narrow := w.extent-2*contentPad-2*cardPad < 460
 			if narrow {
@@ -682,6 +709,7 @@ func (w *window) editorPage(c ui.C) {
 			})
 		})
 		w.editorPresentationCard(c)
+		w.editorRainbowCard(c.Part("rainbow-settings"))
 		w.tabLimitCard(c)
 		semantic := !values.DisableSemanticHighlight
 		w.card(c, settings.EditorSemantic, settings.EditorSemanticHelp, func() {
@@ -715,6 +743,7 @@ func (w *window) footer(c ui.C) {
 			w.setTabRows("", true)
 			w.setTabOverflow("", true)
 			w.setDisableSemanticHighlight(false, true)
+			w.setDisableAutoCompletion(false)
 			w.setVimMode(false, true)
 			w.resetEditorPresentation()
 			w.setProcessTermination(ProcessTermination{}, true)

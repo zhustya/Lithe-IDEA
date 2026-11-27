@@ -33,13 +33,15 @@ func (a *App) Config() app.Config {
 // sessionConfig is the configuration of this workbench's page, as if it had the window alone.
 func (a *App) sessionConfig() app.Config {
 	a.subscribeSettings()
+	opening := openingWindowGeometry(a.settings)
 	base := app.Config{
 		Title:          a.text.App.Name,
 		Icon:           appicon.Window(),
-		Width:          1280,
-		Height:         800,
-		MinWidth:       900,
-		MinHeight:      600,
+		Width:          opening.width,
+		Height:         opening.height,
+		MinWidth:       minWindowWidth,
+		MinHeight:      minWindowHeight,
+		Maximized:      opening.maximized,
 		WindowMode:     app.WindowCustomTitlebar,
 		TitlebarHeight: titleBarHeight,
 		ClearColor:     a.startupBackground(),
@@ -65,11 +67,7 @@ func (a *App) sessionConfig() app.Config {
 		// Files dropped on the welcome page open a folder; on a terminal they become paths.
 		OnFileDrop: a.fileDrop,
 		// Plugin web tool windows show their pages in views of the system's web engine.
-		Web: &a.web,
-	}
-	a.web.OnReady = func() {
-		a.webReady = true
-		a.invalidator.Invalidate()
+		Web: &a.sessions.web,
 	}
 	background := a.colors.Chrome
 	a.root = ui.NewPage(ui.PageConfig{
@@ -78,6 +76,9 @@ func (a *App) sessionConfig() app.Config {
 		// One scrollbar geometry for the whole window: every list, tree and area of the
 		// page inherits it, so the project tree and the Git log measure their bars alike.
 		BarStyle: uistyle.Bars,
+		// Text cut short with an ellipsis shows its whole value when the pointer rests on it;
+		// each region opens the tooltip toward the content beside it (shell_view.go).
+		EllipsisTooltips: true,
 	})
 	config := ui.Configure(a.root, base)
 	// An open pointer hover follows the pointer over the whole window, before the element under
@@ -85,6 +86,7 @@ func (a *App) sessionConfig() app.Config {
 	pointer := config.OnPointer
 	config.OnPointer = func(event gfx.PointerEvent) gfx.EventResult {
 		a.hoverTrackPointer(event)
+		a.trackEditorActionHover(event)
 		return pointer(event)
 	}
 	wheel := config.OnScroll
@@ -142,14 +144,22 @@ func (a *App) endPaint() {
 // and an overlay that hangs off a point of the window is placed against the whole window.
 func (a *App) page(c ui.C) {
 	ui.Stack(c).Fill().Children(func() {
-		if a.project == nil {
+		if a.documentOnly {
+			a.standaloneWorkbench(c)
+		} else if a.project == nil {
 			a.welcomePanel(c)
 		} else {
 			a.workbench(c)
 		}
 		a.windowShortcuts(c)
 		a.noteEditorFocus(c.Canvas().Focused())
-		a.overlays(c)
+		// Declaration order alone cannot put app popups over native web views,
+		// which own the content layer. Viva also uses this band for native masks
+		// and pointer routing; its menus and dialogs stay above it.
+		ui.Overlay(c.Part("workbench-overlays"), ui.OverlaySpec{Band: ui.LayerPaneChrome, Bounds: c.Bounds()}).Children(func() {
+			a.overlays(c)
+		})
+		a.overlay.trappedFocus = !c.Canvas().TrappedFocusScope().IsZero()
 		ui.Toasts(c, &a.overlay.toaster)
 		a.notificationActed(c)
 	})
@@ -158,6 +168,10 @@ func (a *App) page(c ui.C) {
 // workbench declares the window of an open project: the title bar over the stripes and the
 // main column, over the status bar.
 func (a *App) workbench(c ui.C) {
+	if a.project.standalone {
+		a.standaloneWorkbench(c)
+		return
+	}
 	// A copy: a click on a stripe button changes a.chrome while this paint is still being
 	// declared, and the panels must be declared for the same tool windows the sizes were
 	// worked out for.
@@ -179,6 +193,7 @@ func (a *App) workbench(c ui.C) {
 		HitWith(ui.ID(root), a.text.App.Name, gfx.HitOptions{SkipFocus: true}).
 		DropTarget(&a.dnd.tool, a.toolAccept, a.toolDrop).
 		DropTarget(&a.dnd.tab, a.tabAccept, a.tabDrop).
+		DropTarget(&a.dnd.run, a.runDragAccept, a.runDragDrop).
 		Children(func() {
 
 			a.titleBar(c)
@@ -245,7 +260,7 @@ func (a *App) shortcutApplies(c ui.C, id string) bool {
 	focused := c.Canvas().Focused()
 	switch id {
 	case shortcuts.InlineEdit:
-		return a.project != nil && a.focusedDocument(focused) != nil
+		return a.project != nil && !a.project.standalone && a.focusedDocument(focused) != nil
 	case shortcuts.GoToLine:
 		return a.project != nil && a.focusedTerminal(focused) == nil &&
 			(runtime.GOOS == "darwin" || a.focusedDocument(focused) != nil)
@@ -271,7 +286,7 @@ func (a *App) runShortcut(id string, view *editorview.View, term *terminal) {
 		}
 		return
 	case shortcuts.InlineEdit:
-		if p != nil && view != nil {
+		if p != nil && !p.standalone && view != nil {
 			a.requestInlineEdit(p, view)
 		}
 		return
@@ -293,14 +308,18 @@ func (a *App) runShortcut(id string, view *editorview.View, term *terminal) {
 
 // overlays declares everything the window shows over the workbench: the dialogs, the search
 // and navigation popups, the language popups, the plugin prompts, the import of an
-// earlier client's plugin secrets, the Git dialogs and the New Project dialog. Each dialog's
+// earlier client's plugin secrets, the Git dialogs, the New Project dialog, the Remote
+// Development window and the questions Git or a remote connection's SSH client asks while it
+// authenticates. Each dialog's
 // state stays with its own file; the toasts are declared last, over all of them.
 func (a *App) overlays(c ui.C) {
 	a.scratchPopup(c)
 	a.recentFilesPopup(c)
 	a.cloneView(c)
+	a.remoteView(c)
 	if a.project != nil {
 		a.everywherePopup(c)
+		a.remoteHostFilesPopup(c)
 		a.navigationPopup(c)
 		a.semanticPopups(c)
 	}
@@ -330,17 +349,21 @@ func (a *App) overlays(c ui.C) {
 	a.newProjectModal(c)
 	// The update dialog shows on the welcome screen as on a project, over whatever is open.
 	a.updateDialog(c)
+	// A Git question holds up the operation that asked it, which may have any dialog open, so
+	// it shows over all of them.
+	a.gitAuthDialog(c)
 }
 
 // dragLayer declares what a drag in progress paints over the workbench: the zones and
 // previews a dragged button or tab would land in, and its ghost. It paints without a hit, so
 // it takes no input from what it lies over.
 func (a *App) dragLayer(c ui.C) {
-	if !a.dnd.tool.Dragging() && !a.dnd.tab.Dragging() {
+	if !a.dnd.tool.Dragging() && !a.dnd.tab.Dragging() && !a.dnd.run.Dragging() {
 		return
 	}
 	ui.Row(c).Absolute().Left(0).Top(0).Fill().Draw(func(d *ui.DrawContext) {
 		a.paintDrag(d.Canvas)
 		a.paintTabDrag(d.Canvas)
+		a.paintRunDrag(d.Canvas)
 	})
 }

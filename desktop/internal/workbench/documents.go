@@ -18,6 +18,7 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/editorview"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/remoteplaceholder"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/winpath"
 	"github.com/vivaui/viva/gfx"
 	"github.com/vivaui/viva/ui"
@@ -73,7 +74,9 @@ type document struct {
 	// title, and languageID the editor language a language server is selected
 	// by.
 	path, name string
-	languageID string
+	// previewKind explicitly enables safe read-only plugin content previews.
+	previewKind string
+	languageID  string
 	// grammar is the syntax selected on open, including any bundled fallback.
 	// Views of this document share it for the lifetime of the open document.
 	grammar *syntax.Syntax
@@ -96,8 +99,11 @@ type document struct {
 	linkedAutoSaveOff bool
 	// autoSave counts the edits that scheduled an auto-save; a timer saves only when no
 	// later edit came.
-	autoSave           uint64
-	closeWaiters       []func(bool)
+	autoSave     uint64
+	closeWaiters []func(bool)
+	// saveWaiters are plugin saves waiting for the write in flight and any after it; each
+	// learns why a save failed (pluginfilechanges.go).
+	saveWaiters        []func(error)
 	checkWaiters       []func(bool)
 	checkFailed        bool
 	savedRevision      int
@@ -136,6 +142,9 @@ type document struct {
 	// watched, saved or synchronized with a language server, and the host keeps no
 	// copy once it closes.
 	virtual bool
+	// hostOutside marks a remote workspace's file outside its host folder, which opens
+	// read-only and stays so (remote_host_files.go, S25).
+	hostOutside bool
 	// encoding is the id of the text encoding the file is read and written in; "" is plain
 	// UTF-8. hasBOM says a byte order mark leads the file. diskBytes are the bytes the file
 	// held when it was last read or written, kept only for a document whose bytes differ from
@@ -281,7 +290,17 @@ func (a *App) openFile(p *project, path string) {
 		a.selectDocument(p, d.id)
 		return
 	}
-	if kind, ok := viewerKindOf(path); ok {
+	if p.remote != nil {
+		// A remote workspace edits the files of its host folder and shows other host files
+		// read-only (remote_host_files.go); the viewers still read this computer's files.
+		if _, ok := remoteplaceholder.HostPath(p.root, p.remote.binding.RemoteRoot(), path); !ok && a.refuseRemote(p, "open_file") {
+			return
+		}
+		if _, ok := viewerKindOf(path); ok && a.refuseRemote(p, "open_viewer") {
+			return
+		}
+	}
+	if kind, ok := viewerKindOf(path); ok && !p.standalone {
 		a.openViewer(p, path, kind)
 		return
 	}
@@ -296,8 +315,12 @@ func (a *App) openFile(p *project, path string) {
 	name := filepath.Base(path)
 	kernel, _ := a.kernel.(editorKernel)
 	budget := int64(a.searchPreferences.MaxFileBytes)
+	bytesOf := a.documentBytesOf(p)
+	remote := p.remote != nil
 	a.background(p, 0, func(ctx context.Context) func(*App) {
-		read, err := readDocumentEncodedLimit(ctx, kernel, path, budget)
+		// A host file is read over the session (remote_documents.go); decoding, recovery and the
+		// language are payload-only Core commands, so they need no connection.
+		read, err := readDocumentEncodedLimit(ctx, kernel, bytesOf, path, budget)
 		restored := a.prepareRecoveredDocument(ctx, p, path, read.text, err)
 		if restored.found && restored.missing {
 			err = nil
@@ -325,8 +348,9 @@ func (a *App) openFile(p *project, path string) {
 			location := p.docs.locations[path]
 			delete(p.docs.locations, path)
 			defer a.openFinished(p, path, err)
-			if errors.Is(err, errNotText) {
-				// A binary file opens in the hex viewer rather than not at all.
+			if errors.Is(err, errNotText) && !p.standalone && !remote {
+				// A binary file opens in the hex viewer rather than not at all. The viewer reads
+				// this computer's files, so a remote workspace says the file is not text instead.
 				a.openViewer(p, path, viewerHex)
 				return
 			}
@@ -346,8 +370,9 @@ func (a *App) openFile(p *project, path string) {
 			}
 			// A plugin that serves this language starts its server the first time a
 			// file of it is opened, not when the project opens: a workspace of Go
-			// files must not pay for a Java server.
-			if languageID != "" {
+			// files must not pay for a Java server. A remote workspace runs none on this
+			// computer, which would read the placeholder.
+			if languageID != "" && !remote {
 				a.startPluginServer(languageID)
 			}
 			if d := p.docs.byPath(path); d != nil {
@@ -429,7 +454,13 @@ func (a *App) revealDocumentLine(d *document, line int) {
 // readDocument reads an editor file and asks Core to classify its complete
 // contents, refusing binary controls or bytes that cannot be edited as UTF-8.
 func readDocument(path string) ([]byte, error) {
-	data, err := documentio.ReadFile(path)
+	return classifiedDocument(documentio.ReadFile(path))
+}
+
+// classifiedDocument is data, the complete contents of a file read with err, when Core
+// classifies it as editor text: binary controls and bytes that cannot be edited as UTF-8 are
+// refused.
+func classifiedDocument(data []byte, err error) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
@@ -494,6 +525,12 @@ func documentOpenReason(err error) string {
 		return "not_regular"
 	case errors.Is(err, documentio.ErrSymbolicLink):
 		return "symbolic_link"
+	case errors.Is(err, errRemoteDisconnected):
+		return "remote_disconnected"
+	case errors.Is(err, errRemoteTimedOut):
+		return "remote_timed_out"
+	case errors.Is(err, errRemoteFileFailed):
+		return "remote_failed"
 	case errors.Is(err, fs.ErrNotExist):
 		return "not_found"
 	case errors.Is(err, fs.ErrPermission):
@@ -516,6 +553,9 @@ func (a *App) documentReason(err error) string {
 		return i18n.Shared(a.language(), "document.fileAccess.onlyRegularFilesCanBeOpenedAsTextDevicesSocketsAndNamedPipesAreNotSupported")
 	case errors.Is(err, documentio.ErrSymbolicLink):
 		return i18n.Shared(a.language(), "document.fileAccess.openTheTargetFileDirectlySymbolicLinkEditingIsNotSupportedByThisFileAdapter")
+	}
+	if reason, ok := a.remoteDocumentReason(err); ok {
+		return reason
 	}
 	var pathErr *os.PathError
 	if errors.As(err, &pathErr) {
@@ -542,7 +582,7 @@ func (a *App) placeDocumentAs(p *project, path, name string, content editorview.
 		return
 	}
 	p.docs.next = id
-	d := &document{id: id, path: path, name: name, languageID: languageID, grammar: grammar, virtual: virtual}
+	d := &document{id: id, path: path, name: name, languageID: languageID, grammar: grammar, virtual: virtual, hostOutside: !virtual && p.remoteOutsideDocument(path)}
 	d.view = editorview.New(editorview.Config{
 		Label:   name,
 		Content: content,
@@ -554,7 +594,7 @@ func (a *App) placeDocumentAs(p *project, path, name string, content editorview.
 			a.mirrorDocumentEdit(p, d, edit)
 		},
 	})
-	d.view.SetReadOnly(virtual)
+	d.view.SetReadOnly(virtual || d.hostOutside)
 	d.view.SetVimExit(func(cmd string) bool { return a.vimExit(p, d, cmd) })
 	setupFolding(d)
 	d.breakpointText = d.view.TextSnapshot()
@@ -563,7 +603,10 @@ func (a *App) placeDocumentAs(p *project, path, name string, content editorview.
 	a.refreshGitGutter(p, d)
 	a.refreshInlineBlame(p, d)
 	p.docs.group = group
-	if !virtual {
+	if !virtual && p.remote == nil {
+		// A remote document is checked when the host watch reports a change of its file
+		// (remote_watch.go), when it is saved, before it closes and after the connection opens
+		// again (remote_documents.go).
 		a.watchDocument(p, d)
 	}
 	a.focusDocument(id)
@@ -571,6 +614,7 @@ func (a *App) placeDocumentAs(p *project, path, name string, content editorview.
 	if !virtual {
 		a.startDocumentSync(p, d)
 		a.scheduleEditorActions(p, d)
+		a.scheduleColorDecorations(p, d, 0)
 	}
 	a.enforceTabLimit(p, d)
 	if !virtual {
@@ -609,6 +653,14 @@ func (a *App) selectDocument(p *project, id int) {
 	if a.semantics.documentID != 0 && a.semantics.documentID != id {
 		a.closePluginSemantics()
 	}
+	if d := a.semantics.symbolHighlights.key.document; d != nil && d.id != id {
+		a.clearSymbolHighlights()
+	}
+	for _, doc := range p.docs.list {
+		if doc.id != id {
+			a.clearEditorActionHover(doc)
+		}
+	}
 	if g.Selected != member && !a.reduceTerminals(p, p.terms.bench, core.ActivateEditor(g.ID, member)) {
 		return
 	}
@@ -616,6 +668,7 @@ func (a *App) selectDocument(p *project, id int) {
 	a.focusDocument(id)
 	p.touchDocument(id)
 	if d := p.docs.find(id); d != nil {
+		a.syncSymbolHighlights(p, d)
 		a.noteRecentFile(p, d, "opened")
 		if d.actionsTimedOut {
 			a.scheduleEditorActions(p, d)
@@ -628,11 +681,25 @@ func (a *App) focusDocument(id int) { a.focus = focusTarget{doc: id} }
 
 // saveDocument serializes writes for a document. A repeated request is coalesced,
 // and close waiters resume only after the latest editor contents are persisted.
-func (a *App) saveDocument(p *project, id int) { a.saveDocumentMode(p, id, false) }
+func (a *App) saveDocument(p *project, id int) { a.saveDocumentMode(p, id, saveUser) }
 
-// saveDocumentMode is saveDocument for the user or, with auto, for auto-save, which never
-// overwrites a conflict, recreates a deleted file or asks about a hard link.
-func (a *App) saveDocumentMode(p *project, id int, auto bool) {
+// saveMode says who asked for a save.
+type saveMode int
+
+const (
+	// saveUser is the user's Save, which may ask how to write a hard-linked file.
+	saveUser saveMode = iota
+	// saveAuto is auto-save, which never overwrites a conflict, recreates a deleted file or
+	// asks about a hard link.
+	saveAuto
+	// savePlugin is a plugin's documents/save (pluginfilechanges.go). It never asks the user
+	// anything: its caller refused conflicts before, and a hard link fails it.
+	savePlugin
+)
+
+// saveDocumentMode is saveDocument for whoever mode names.
+func (a *App) saveDocumentMode(p *project, id int, mode saveMode) {
+	auto := mode == saveAuto
 	d := p.docs.find(id)
 	if d == nil || d.virtual {
 		return
@@ -680,11 +747,18 @@ func (a *App) saveDocumentMode(p *project, id int, auto bool) {
 	consent := d.linkConsent
 	d.linkConsent = nil
 	d.saving = true
+	remote := a.remoteDocuments(p)
 	a.background(p, 0, func(ctx context.Context) func(*App) {
 		var err error
 		bytesOut := data
 		if bytesOut, err = a.encodeForSave(ctx, d, data); err == nil {
 			switch {
+			case remote != nil && missing:
+				err = remote.create(ctx, path, bytesOut)
+			case remote != nil:
+				// The host replaces the file as its own, so a remote save never asks about
+				// hard links.
+				err = remote.save(ctx, path, bytesOut, expected)
 			case missing:
 				err = create(path, bytesOut)
 			case consent != nil:
@@ -698,8 +772,12 @@ func (a *App) saveDocumentMode(p *project, id int, auto bool) {
 			defer a.scheduleDocumentChecks(p)
 			if err != nil {
 				d.saveAgain = false
+				a.finishSaveWaiters(d, err)
 				var required *documentio.HardLinkRequired
 				if errors.As(err, &required) {
+					if mode == savePlugin && len(d.closeWaiters) == 0 {
+						return // Only the user may choose how a hard-linked file is written.
+					}
 					a.hardLinkSaveRequired(p, d, required.Identity, auto && len(d.closeWaiters) == 0)
 					return
 				}
@@ -714,7 +792,14 @@ func (a *App) saveDocumentMode(p *project, id int, auto bool) {
 					}
 					return
 				}
-				if errors.Is(err, documentio.ErrConflict) {
+				if missing {
+					// Restore the last observed deletion so a failed recreation still offers
+					// a way to discard the buffer. The fresh check updates that observation.
+					d.recreateMissing = false
+					d.conflicted, d.conflictMissing = true, true
+					d.conflictGeneration++
+				}
+				if missing || errors.Is(err, documentio.ErrConflict) {
 					d.checkPending = true
 				}
 				a.saveFailed(id, revision, name, err)
@@ -744,6 +829,10 @@ func (a *App) saveDocumentMode(p *project, id int, auto bool) {
 			a.refreshGitGutter(p, d)
 			a.refreshInlineBlame(p, d)
 			a.reloadBuildForSavedFile(p, path)
+			if d.view.IsComposing() && d.dirty() && len(d.saveWaiters) > 0 {
+				// The text typed during the write is not settled; a plugin's save fails as busy.
+				a.finishSaveWaiters(d, errComposing)
+			}
 			if d.view.IsComposing() && len(d.closeWaiters) > 0 {
 				a.saveFailed(id, d.view.Revision(), name, errComposing)
 				waiters := d.closeWaiters
@@ -754,12 +843,18 @@ func (a *App) saveDocumentMode(p *project, id int, auto bool) {
 				}
 				return
 			}
-			if (d.saveAgain || len(d.closeWaiters) > 0) && d.dirty() {
+			if (d.saveAgain || len(d.closeWaiters) > 0 || len(d.saveWaiters) > 0) && d.dirty() {
+				// Only a plugin waiting keeps the next write a plugin's, which asks nothing.
+				next := saveUser
+				if !d.saveAgain && len(d.closeWaiters) == 0 {
+					next = savePlugin
+				}
 				d.saveAgain = false
-				a.saveDocument(p, id)
+				a.saveDocumentMode(p, id, next)
 				return
 			}
 			d.saveAgain = false
+			a.finishSaveWaiters(d, nil)
 			waiters := d.closeWaiters
 			d.closeWaiters = nil
 			for _, done := range waiters {
@@ -874,6 +969,9 @@ func (a *App) closeDocument(p *project, id int) {
 // removeDocument takes a tab away without asking about its text. The caller has saved it or
 // decided that it is going away: deleting its file, for one.
 func (a *App) removeDocument(p *project, d *document) {
+	if a.semantics.symbolHighlights.key.document == d {
+		a.clearSymbolHighlights()
+	}
 	a.closePreviewsOfDocument(d)
 	d.find.dispose()
 	d.cancelAutoSave()
@@ -884,6 +982,7 @@ func (a *App) removeDocument(p *project, d *document) {
 		// A document without a tab is released with nothing to close, once it is saved.
 		if d.tabless && !d.dirty() {
 			a.semanticTokensDropped(d)
+			a.dropColorDecorations(d)
 			a.clearDocumentInlayHints(d)
 			d.closeEditorView()
 			p.docs.list = slices.DeleteFunc(p.docs.list, func(x *document) bool { return x.id == d.id })
@@ -897,6 +996,7 @@ func (a *App) removeDocument(p *project, d *document) {
 		return
 	}
 	a.semanticTokensDropped(d)
+	a.dropColorDecorations(d)
 	a.clearDocumentInlayHints(d)
 	d.closeEditorView()
 	p.docs.list = slices.DeleteFunc(p.docs.list, func(x *document) bool { return x.id == d.id })
@@ -928,6 +1028,8 @@ func (a *App) saveProjectPass(p *project, verified map[int]int, done func(bool))
 	for _, d := range p.docs.list {
 		documents = append(documents, core.SaveBatchDocument{ID: documentMember(d.id), Dirty: !d.scratch && (d.dirty() || d.conflicted), ContentSynchronized: !d.view.IsComposing()})
 	}
+	// The save batch is planned from the documents' states alone, so it goes without a remote
+	// workspace's binding, which Core refuses for a request with no remote adapter.
 	ctx, cancel := context.WithTimeout(p.ctx, kernelCallTimeout)
 	plan, err := a.kernel.PlanDocumentSaveBatch(ctx, documents)
 	cancel()
@@ -981,6 +1083,7 @@ func (a *App) saveProjectPass(p *project, verified map[int]int, done func(bool))
 
 // closeDocuments releases views after their saves have completed.
 func (a *App) closeDocuments(p *project) {
+	a.clearSymbolHighlights()
 	for _, watch := range p.docs.watches {
 		watch.close()
 	}
@@ -988,6 +1091,7 @@ func (a *App) closeDocuments(p *project) {
 		a.flushCheckpoint(p, d, false)
 		d.find.dispose()
 		d.cancelAutoSave()
+		a.dropColorDecorations(d)
 		a.clearDocumentInlayHints(d)
 		d.closeEditorView()
 	}

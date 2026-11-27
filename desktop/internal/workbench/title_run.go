@@ -79,6 +79,7 @@ func (a *App) loadTitleRunConfigs(p *project) {
 // openRunConfigMenu opens the run configuration menu, closes the other menus of the title bar
 // and starts reading the configurations the menu lists.
 func (a *App) openRunConfigMenu() {
+	a.closeRemoteHostMenu()
 	a.title.runConfigOpen = true
 	a.title.projectOpen, a.title.gearOpen = false, false
 	a.closeBranches()
@@ -150,6 +151,11 @@ func (a *App) titleDebug(p *project) {
 // while the configurations are read, and an answer that settles them while they are asked for
 // performs it; otherwise Core decides what the press does now.
 func (a *App) titleStart(p *project, action titleAction) {
+	// A remote workspace's project runs on its host, where Run starts a built-in configuration
+	// (remote_run.go); Debug and the current file's run do not reach it yet.
+	if (action == titleActionDebug || p.runConfigs.currentFile) && a.refuseRemote(p, "title_run") {
+		return
+	}
 	if !p.runConfigs.currentFile {
 		p.runConfigs.pending = action
 		a.loadTitleRunConfigs(p)
@@ -182,6 +188,14 @@ func (a *App) decideTitleAction(p *project, action titleAction, trigger string) 
 		facts.Action = "debug"
 	}
 	configuration := p.titleConfiguration()
+	if p.remote != nil && configuration != nil && !configuration.IsProcess() && !configuration.Unavailable() {
+		// A remote workspace detects no build system and runs no plugin, so only a built-in
+		// configuration starts there; the others say why instead of a missing target.
+		p.runConfigs.pending = titleActionNone
+		a.operationRejected("title_run", "remote_workspace")
+		a.notifyError(i18n.Shared(a.language(), "desktop.run.remote.unsupported"))
+		return
+	}
 	var reference core.RunProviderReference
 	index := -1
 	if configuration != nil {
@@ -240,8 +254,8 @@ func (a *App) decideTitleAction(p *project, action titleAction, trigger string) 
 	case "run":
 		a.runConfiguration(p, configuration.ID)
 	case "debug":
-		// A run that names a public debug type debugs as a service the registered adapter of
-		// that type attaches to; one that names its own plugin's adapter debugs a prepared program.
+		// A run that names a public debug type starts suspended so the registered
+		// adapter can attach. A run that names a native adapter prepares a launch.
 		if run, ok := buildRunDeclaration(p.build.instances[index].System, reference.Run); ok && run.DebugAdapter == "" && run.DebugConfigurationType != "" {
 			a.debugRunConfiguration(p, configuration.ID, run.DebugConfigurationType)
 			return
@@ -267,15 +281,4 @@ func (p *project) titleConfigurationFacts(index int, reference core.RunProviderR
 	run, ok := buildRunDeclaration(instance.System, reference.Run)
 	debuggable := ok && run.Debuggable()
 	return &core.TitleConfiguration{Kind: "modelLoaded", Debuggable: &debuggable}
-}
-
-// performCurrentFileAction is Run or Debug on Current File. The Debug window starts the open
-// file under its selected adapter; Run starts the entrypoint a build provider finds in the
-// open file (runCurrentFileEntrypoint).
-func (a *App) performCurrentFileAction(p *project, action titleAction) {
-	if action == titleActionDebug {
-		a.whenDebugAdaptersLoaded(p, func() { a.startDebug(p) })
-		return
-	}
-	a.runCurrentFileEntrypoint(p)
 }

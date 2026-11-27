@@ -7056,13 +7056,6 @@
       ]
     },
     {
-      "id": "desktop.build.optionsTitle",
-      "description": "Build window toolbar button and dialog title for which folders build system detection skips",
-      "platforms": [
-        "desktop"
-      ]
-    },
-    {
       "id": "desktop.build.detection",
       "description": "Heading of the Build options dialog section that sets how build systems are detected",
       "platforms": [
@@ -7307,13 +7300,6 @@
     {
       "id": "desktop.clone.invalidName",
       "description": "Desktop clone repository: invalidName",
-      "platforms": [
-        "desktop"
-      ]
-    },
-    {
-      "id": "desktop.clone.more",
-      "description": "Desktop welcome: More project actions",
       "platforms": [
         "desktop"
       ]
@@ -9226,6 +9212,23 @@
       ]
     },
     {
+      "id": "desktop.editorActions.starting",
+      "description": "Immediate info toast when invoking a plugin editor action",
+      "platforms": [
+        "desktop"
+      ],
+      "parameters": {
+        "label": "string"
+      }
+    },
+    {
+      "id": "desktop.editorActions.tooltip",
+      "description": "Accessibility title of the editor gutter action tooltip.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.editorMenu.back",
       "description": "Editor context menu: back to the previous caret place",
       "platforms": [
@@ -9268,8 +9271,22 @@
       ]
     },
     {
+      "id": "desktop.editorMenu.goToImplementation",
+      "description": "Editor context menu: go to implementation",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.editorMenu.goToLine",
       "description": "Editor context menu: go to a line and column",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.editorMenu.goToSuper",
+      "description": "Editor context menu: go to super declaration",
       "platforms": [
         "desktop"
       ]
@@ -10191,7 +10208,7 @@
     },
     {
       "id": "desktop.git.console.settings",
-      "description": "Desktop Git console: toolbar button that opens the Version Control settings, which choose the queries the console records and how it draws them.",
+      "description": "Desktop Git console: toolbar button that opens the Git settings page, which choose the queries the console records and how it draws them.",
       "platforms": [
         "desktop"
       ]
@@ -10776,7 +10793,7 @@
     },
     {
       "id": "desktop.git.settings.changeLists",
-      "description": "Version Control settings switch: show the local ChangeLists of the Commit window",
+      "description": "Git settings switch: show the local ChangeLists of the Commit window",
       "platforms": [
         "desktop"
       ]
@@ -10804,7 +10821,7 @@
     },
     {
       "id": "desktop.git.settings.parentReferences",
-      "description": "Version Control settings switch: show the option that updates parent repositories' references",
+      "description": "Git settings switch: show the option that updates parent repositories' references",
       "platforms": [
         "desktop"
       ]
@@ -10818,14 +10835,14 @@
     },
     {
       "id": "desktop.git.settings.logLimits",
-      "description": "Version Control settings: title of the card that sets the most commits the Git Log reads",
+      "description": "Git settings: title of the card that sets the most commits the Git Log reads",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.git.settings.logLimitsHelp",
-      "description": "Help of the Git Log limits card in the Version Control settings",
+      "description": "Help of the Git Log limits card in the Git settings",
       "platforms": [
         "desktop"
       ]
@@ -10870,7 +10887,7 @@
     },
     {
       "id": "desktop.git.settings.console.omitted",
-      "description": "Version Control settings: title of the card that chooses which internal Git queries the Git console leaves out",
+      "description": "Git settings: title of the card that chooses which internal Git queries the Git console leaves out",
       "platforms": [
         "desktop"
       ]
@@ -11010,7 +11027,7 @@
     },
     {
       "id": "desktop.git.settings.console.display",
-      "description": "Version Control settings: title of the card that chooses how the Git console draws its records",
+      "description": "Git settings: title of the card that chooses how the Git console draws its records",
       "platforms": [
         "desktop"
       ]
@@ -11803,7 +11820,7 @@
     },
     {
       "id": "desktop.github.settingsTitle",
-      "description": "Title of the GitHub account card on the Version Control settings page",
+      "description": "Title of the GitHub account card on the Git settings page",
       "platforms": [
         "desktop"
       ]
@@ -12399,49 +12416,42 @@
     },
     {
       "id": "desktop.languageStatus.degraded",
-      "description": "Language server state card value when it runs with reduced features",
+      "description": "Language server state on a language row of the Languages & Frameworks directory when it runs with reduced features",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.languageStatus.failed",
-      "description": "Language server state card value when it failed",
+      "description": "Language server state on a language row of the Languages & Frameworks directory when it failed",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.languageStatus.none",
-      "description": "Language server state card value when no server runs",
+      "description": "Language server state on a language row of the Languages & Frameworks directory when no server runs",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.languageStatus.ready",
-      "description": "Language server state card value when it is ready",
+      "description": "Language server state on a language row of the Languages & Frameworks directory when it is ready",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.languageStatus.starting",
-      "description": "Language server state card value while it starts",
+      "description": "Language server state on a language row of the Languages & Frameworks directory while it starts",
       "platforms": [
         "desktop"
       ]
     },
     {
       "id": "desktop.languageStatus.stopped",
-      "description": "Language server state card value when it stopped",
-      "platforms": [
-        "desktop"
-      ]
-    },
-    {
-      "id": "desktop.languageStatus.title",
-      "description": "Label of the language server state card on a language settings page",
+      "description": "Language server state on a language row of the Languages & Frameworks directory when it stopped",
       "platforms": [
         "desktop"
       ]
@@ -13085,6 +13095,37 @@
       "parameters": {
         "count": "string"
       }
+    },
+    {
+      "id": "desktop.marketplace.recommendedTitle",
+      "description": "Short notification title for workspace-matched marketplace plugin suggestions.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.marketplace.recommendedPlugins",
+      "description": "Notification body listing workspace-matched marketplace plugins to install for the opened project.",
+      "platforms": [
+        "desktop"
+      ],
+      "parameters": {
+        "plugins": "string"
+      }
+    },
+    {
+      "id": "desktop.marketplace.recommendedAction",
+      "description": "Primary notification action button opening plugin settings for workspace plugin recommendations.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.marketplace.recommendedDismiss",
+      "description": "Secondary notification action button dismissing future recommendations for the listed plugins.",
+      "platforms": [
+        "desktop"
+      ]
     },
     {
       "id": "desktop.marketplace.disableAutoUpdates",
@@ -15375,6 +15416,20 @@
       ]
     },
     {
+      "id": "desktop.run.collapseDetails",
+      "description": "Disclosure button to collapse an execution's detail rows in the Run tool window tree",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.run.detachTab",
+      "description": "Context menu action to move a grouped execution into its own tab in the Run tool window",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.run.durationHours",
       "description": "How long an execution took, at least an hour. {hours} and {minutes} are whole numbers.",
       "platforms": [
@@ -15432,6 +15487,13 @@
       ]
     },
     {
+      "id": "desktop.run.expandDetails",
+      "description": "Disclosure button to expand an execution's detail rows in the Run tool window tree",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.run.exited",
       "description": "Run finished. {code} is the exit code.",
       "platforms": [
@@ -15456,6 +15518,13 @@
       ]
     },
     {
+      "id": "desktop.run.mergeIntoGroup",
+      "description": "Context menu action to merge a detached execution tab back into its plugin group in the Run tool window",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.run.performance.cpu",
       "description": "Latest CPU share of a running run's process tree, shown under its chart",
       "platforms": [
@@ -15473,6 +15542,47 @@
       ],
       "parameters": {
         "megabytes": "string"
+      }
+    },
+    {
+      "id": "desktop.run.ports.copy",
+      "description": "Context menu item on a listening port badge that copies its URL to the clipboard",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.run.ports.label",
+      "description": "Row label under the execution tree introducing the TCP ports a run process tree listens on",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.run.ports.more",
+      "description": "Badge showing how many additional listening ports are hidden after the primary port",
+      "platforms": [
+        "desktop"
+      ],
+      "parameters": {
+        "count": "string"
+      }
+    },
+    {
+      "id": "desktop.run.ports.open",
+      "description": "Context menu item on a listening port badge that opens its URL in a browser",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.run.ports.openFailed",
+      "description": "Error toast shown when opening a listening port URL in the browser fails",
+      "platforms": [
+        "desktop"
+      ],
+      "parameters": {
+        "url": "string"
       }
     },
     {
@@ -16947,8 +17057,22 @@
       ]
     },
     {
+      "id": "desktop.semantics.implementations",
+      "description": "Accessibility title of the implementation target list.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.semantics.noDefinition",
       "description": "Banner shown when a definition request returns no openable target.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.semantics.noImplementations",
+      "description": "Banner shown when an implementation request returns no openable target.",
       "platforms": [
         "desktop"
       ]
@@ -16963,6 +17087,13 @@
     {
       "id": "desktop.semantics.noServer",
       "description": "Banner shown when a language command has no running language server for the file.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.semantics.noSuperDeclaration",
+      "description": "Banner shown when a super-declaration request returns no openable target.",
       "platforms": [
         "desktop"
       ]
@@ -20590,6 +20721,37 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "desktop.settings.unreadable.title",
+      "description": "Title of the startup warning for an unreadable application settings file.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.settings.unreadable.detail",
+      "description": "Explains the startup fallback and when the unreadable file will be backed up.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.settings.backup.title",
+      "description": "Title of the notice after moving an unreadable application settings file aside.",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.settings.backup.detail",
+      "description": "Shows the actual backup location after moving the original file aside.",
+      "platforms": [
+        "desktop"
+      ],
+      "parameters": {
+        "path": "string"
+      }
     },
     {
       "id": "desktop.settings.unknownKept",
@@ -27130,8 +27292,7 @@
       "id": "git.diff.oneDifference",
       "description": "Windows UI: git.diff.oneDifference",
       "platforms": [
-        "windows",
-        "desktop"
+        "windows"
       ]
     },
     {
@@ -51075,7 +51236,8 @@
       "id": "native.copyJSON",
       "description": "Native UI: Copy JSON",
       "platforms": [
-        "macos"
+        "macos",
+        "desktop"
       ],
       "macos": {
         "key": "Copy JSON",
@@ -81692,18 +81854,6 @@
       }
     },
     {
-      "id": "native.settingValuesOnlyFillThePlacesTheProgramTemplatesReserveForThemSoChangingASetta1ef53141a",
-      "description": "Native UI: Setting values only fill the places the program templates reserve for them, so changing a setting never changes the programs above.",
-      "platforms": [
-        "macos",
-        "desktop"
-      ],
-      "macos": {
-        "key": "Setting values only fill the places the program templates reserve for them, so changing a setting never changes the programs above.",
-        "arguments": []
-      }
-    },
-    {
       "id": "native.settings",
       "description": "Native UI: Settings…",
       "platforms": [
@@ -93066,7 +93216,8 @@
       "id": "native.updateLog",
       "description": "Native UI: Update log",
       "platforms": [
-        "macos"
+        "macos",
+        "desktop"
       ],
       "macos": {
         "key": "Update log",
@@ -108793,6 +108944,20 @@
       ]
     },
     {
+      "id": "desktop.editorPrefs.autoCompletion",
+      "description": "IDE editor essentials: automatic completion toggle",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.editorPrefs.autoCompletionHelp",
+      "description": "IDE editor essentials: automatic completion toggle help",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
       "id": "desktop.editorMenu.codeActions",
       "description": "Editor context menu: open code actions popup",
       "platforms": [
@@ -110113,6 +110278,62 @@
         "count": "string",
         "files": "string"
       }
+    },
+    {
+      "id": "desktop.pluginHost.backgroundTasks",
+      "description": "Native plugin workflow backgroundTasks",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.commandFailed",
+      "description": "Native plugin workflow commandFailed",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.diff",
+      "description": "Native plugin workflow diff",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.inputLimit",
+      "description": "Native plugin workflow inputLimit",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.modified",
+      "description": "Native plugin workflow modified",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.noOutput",
+      "description": "Native plugin workflow noOutput",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.original",
+      "description": "Native plugin workflow original",
+      "platforms": [
+        "desktop"
+      ]
+    },
+    {
+      "id": "desktop.pluginHost.output",
+      "description": "Native plugin workflow output",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

@@ -18,7 +18,10 @@ import (
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginhost"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginservice"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginstate"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/settingswindow"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/store"
 )
 
 const commandInstallerPluginID = "dev.lithe.test.command-installers"
@@ -302,7 +305,7 @@ func TestCommandInstallManagedRecordsWhereLaterLaunchesFindTheCommand(t *testing
 		t.Setenv(name, private)
 	}
 	var output commandOutput
-	directory, err := installs.Install(ctx, commandInstallerPluginID, "fixture-ls", core.CommandInstallManaged, output.add)
+	directory, err := installs.Install(ctx, commandInstallerPluginID, "fixture-ls", core.CommandInstallManaged, output.add, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +345,7 @@ func TestCommandInstallManagedRecordsWhereLaterLaunchesFindTheCommand(t *testing
 func TestCommandInstallToolDefaultRecordsTheProbedDirectory(t *testing.T) {
 	h, _, home := commandInstallerHarness(t, fixtureToolInstalls)
 	installs := settingsCommandInstalls{app: h.app}
-	directory, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, "fixture-ls", core.CommandInstallToolDefault, func(string) {})
+	directory, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, "fixture-ls", core.CommandInstallToolDefault, func(string) {}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +389,7 @@ func TestCommandInstallReportsWhyTheCommandsDidNotLand(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			installed, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, test.installer, core.CommandInstallManaged, func(string) {})
+			installed, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, test.installer, core.CommandInstallManaged, func(string) {}, nil)
 			var failure *pluginhost.CommandInstallError
 			if !errors.As(err, &failure) {
 				t.Fatalf("Install = %q, %v; want a CommandInstallError", installed, err)
@@ -418,7 +421,7 @@ func TestCommandInstallStopsTheToolWhenCancelled(t *testing.T) {
 		if line == "fixture: downloading" {
 			cancel()
 		}
-	})
+	}, nil)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Install = %v, want the cancel", err)
 	}
@@ -434,7 +437,7 @@ func TestCommandInstallStopsTheToolWhenCancelled(t *testing.T) {
 func TestCommandInstallRefusesATargetTheInstallerLacks(t *testing.T) {
 	h, _, _ := commandInstallerHarness(t, fixtureToolInstalls)
 	installs := settingsCommandInstalls{app: h.app}
-	if _, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, "fixture-dap", core.CommandInstallToolDefault, func(string) {}); err == nil {
+	if _, err := installs.Install(commandInstallContext(t), commandInstallerPluginID, "fixture-dap", core.CommandInstallToolDefault, func(string) {}, nil); err == nil {
 		t.Fatal("installed into a target the installer does not declare")
 	}
 	if _, err := installs.Offer(commandInstallContext(t), commandInstallerPluginID, "absent"); err == nil {
@@ -473,5 +476,32 @@ func TestCommandMissingFailuresAreLocalized(t *testing.T) {
 	}
 	if _, ok := commandMissingMessage(i18n.English, errors.New("other")); ok {
 		t.Fatal("an unrelated failure counted as a missing command")
+	}
+}
+
+func TestCommandInstallerFallsBackToToolIDAndRecordsUnreadableCatalog(t *testing.T) {
+	const plugin = "dev.lithe.test.incomplete"
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, plugin, "1.0.0"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prefs := store.At(t.TempDir())
+	if err := pluginstate.New(prefs).SetEnabled(plugin, true); err != nil {
+		t.Fatal(err)
+	}
+	service, err := pluginservice.Open(core.NewClient(), prefs, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := &treeRecordingLog{}
+	installer := settingsCommandInstalls{app: &App{plugins: service, logSink: log}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	const tool = plugin + ":compiler"
+	if name := toolName(installer.toolNames(ctx), tool); name != tool {
+		t.Fatalf("fallback = %q, want %q", name, tool)
+	}
+	if len(log.events) != 1 || log.events[0].Fields["operation"] != "command_installer_tool_discovery" {
+		t.Fatalf("expected one discovery diagnostic, got %+v", log.events)
 	}
 }

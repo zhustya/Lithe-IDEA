@@ -2,7 +2,7 @@
 # Builds the pinned Lithe-core-rust static library for the Viva desktop client and stages the
 # header, archive, native linker flags and build identity under .artifacts/desktop/lithe-core/:
 #
-# Usage: scripts/desktop/build-desktop-core.sh [--debug|--release]
+# Usage: scripts/desktop/build-desktop-core.sh [--debug|--release|--checkout-only]
 #
 #   include/lithe_core.h     the C ABI header of that core revision
 #   lib/liblithe_core.a      the static library that cgo links
@@ -13,6 +13,9 @@
 # LITHE_CORE_RUST_DIR points the build at a local core checkout. LITHE_CORE_TARGET selects a Rust
 # target; Windows uses x86_64-pc-windows-gnu because cgo cannot link an MSVC .lib archive. The
 # staging directory is build state of this worktree and is never written into an app bundle.
+#
+# --checkout-only prepares the same core checkout, builds nothing and prints the checkout instead.
+# scripts/desktop/build-remote-server.sh uses it, so the pin and the clone live only here.
 #
 # The staging directory is the only line written to standard output, so a caller can read it.
 set -euo pipefail
@@ -289,19 +292,115 @@ PINNED_CORE_REPOSITORY="https://github.com/Lithe-IDEA/Lithe-core-rust.git"
 # rows), #13, #8, #7, #6 and #4.
 # Search pages, unsaved snapshots, source identities and budgets from Core #125,
 # merged on top of the build-option changes through Core #124.
-PINNED_CORE_REVISION="604699f0df9a7c5ec1b245d3f2526d158f5a8eed"
+# CLI launch policy, isolated document command policy and opt-in shell registration from Core #129.
+# Lithe-core-rust main at d630938 (#130 squash-merged): companion marketplace recommendations
+# contract, resolveSource.recommendationsURL, and plugins.marketplace.recommendForWorkspace (#2228).
+# Core #132, merged into main: reviewed-tip force deletion and first-primary-click selection.
+# Core #133, merged into main: commandInstallers 1 pinned archive downloads (API-23).
+# Lithe-core-rust main at 43e3f27: #135 resolves an external installation whose layout file links
+# to another file name (rustup's cargo and rust-analyzer proxies) to the layout path, so probes and
+# launches start cargo, not rustup; #134 hardens remote connections and #136 logs the remote
+# connection lifecycle as structured log v2 events.
+# Lithe-core-rust main at 4ab420e: #140 records remote workspace trust by target and host real
+# path (S01/S02/S04); #141 starts no Git, language server, build provider or VCS that runs project
+# code for a workspace the user has not trusted (#2208).
+# Lithe-core-rust main at 94408ca: #142 returns Git's authentication failure without asking to
+# retry once a credential question was cancelled or expired unanswered (#2231).
+# Lithe-core-rust main at 7c1cd55: #143 shares one peer_uid implementation across the remote
+# crate; #144 lets toolchains.editCatalog add and remove trustedLocations, refusing filesystem
+# roots and lists over 256 entries (#2207).
+# Lithe-core-rust main at 7901a86: #145 keeps the saved SSH connections (remote.connections,
+# remote.editConnections) and refuses a field of a connection by name; #146 checks the server
+# build against the SHA-256 the client names before uploading it (S17); #148 gives OpenSSH only
+# allow-listed environment variables (S26); #149 reports resource labels, running time and the
+# terminal command in server.state (#2231).
+# Lithe-core-rust main at 66a1476: #147 starts, stops and lists port forwards
+# (remote.startForward, remote.stopForward, remote.forwards) and names the process of each
+# listening port (S28/S29, #2231).
+# Lithe-core-rust main at 822f871: #154 remote.parseAddress, remote.effectiveSettings,
+# remote.sshConfigHosts and remote.mottyHosts; the connections query, import and markConnected;
+# remoteStage events and classified authentication questions (#2231); #155 build preferences.
+# Lithe-core-rust main at ae593eb: #156 remote.parseForwardAddress reads a port, host:port or URL
+# typed into the Ports window (#2231).
+# Lithe-core-rust main at 5c163e9: #157 remote.connect opens a local WSL distribution through
+# wsl.exe (the wsl field) and remote.listWslDistributions lists the installed ones (#2231).
+# Lithe-core-rust main at 49fb750: #158 remote.preferences and remote.editPreferences (SSH program,
+# reconnect limit) feed the remote commands, with the reconnect pauses given by Core (#2231).
+# Lithe-core-rust main at 62d44ce: #159 host forward rules and reverse forwards (#2231).
+# Lithe-core-rust main at ac80382: #160 remote.connect runs the persistent host session and resumes
+# a kept one; remote.disconnect ends or keeps the host programs; remote.runningPrograms,
+# remote.endPrograms (all or the listed ones), the closePrograms preference and
+# closing.idleTimeoutSeconds; #161 plans the run configurations of a remote workspace (#2231).
+# Lithe-core-rust main at 57e55d6: #162 remote.connect enters a running Docker or Podman container
+# (the container field), also on an SSH host or in a WSL distribution; remote.listContainers lists
+# the running ones; remote.devcontainerConfigs and remote.devcontainerUp build and start the
+# container of a devcontainer.json; #163 remote.portRecords keeps a workspace's ports and forwards;
+# #164 fs.readFile reads only regular files, so a named pipe no longer blocks it (#2231, #2270).
+# Lithe-core-rust main at 2e4be2c: #166 a connection accepts a Windows domain user (DOMAIN\name,
+# name@domain) and remote.mottyHosts marks a refused setting on its own field with the invalid
+# status; #165 ending a remote session releases the search indexes it built (#2231, #2277).
+# Lithe-core-rust main at 18feb4a: #167 remote.attachProcess takes back a process of a resumed or
+# kept host session (#2231).
+# Lithe-core-rust main at 3cb3c5b: #169 (eeebb58) a WSL connection reads what wsl.exe printed on
+# standard output, so a distribution that is not installed is unreachable and other failures keep
+# its message (#2231); #170 (1f05cfe) only fixes the Windows clippy CI step and a test; #171 moves
+# the Go plugin SDK to Go 1.27.4 like the desktop. The Rust sources are the same as #169's branch
+# commit edad041 that the desktop pinned before.
+# Lithe-core-rust main at 4430719: #172 a host's capabilities report its WSL interop state;
+# #173 plugins.marketplace.resolveSource reports the repository and branch an index follows and
+# pins its address to a commit past raw.githubusercontent.com's branch cache, and the GitHub
+# requests gain latestCommit and listReleases for that pin and the installed plugins' changelog.
+# Lithe-core-rust main at dcb3d77: #174 lets a settings region's tool row carry choose and
+# become the tool's picker, and the contract says a view call carries the window's workspace
+# context; #174 merged with that field under a new ui 1, and #175 makes choose an optional field
+# within ui 0 again. The sources are the same as the branch commit a50cea1 that the desktop
+# pinned before; only the protocol changelog differs.
+# Lithe-core-rust main at 4880022: #177 lets a tool definition set executableLinksOutsideHome, a
+# toolDefinitions 0 addition, so a virtual environment's program that links to its base
+# interpreter outside the home is accepted and started from its layout path; the directories on
+# the way must stay inside the home. #176 documents that a backend that decides how its language
+# server starts is asked again when a setting that applies immediately changes. The sources are
+# the same as #177's branch commit 33e6b60 that the desktop pinned before; only the protocol
+# changelog and the plugin docs differ.
+# Lithe-core-rust main at aadf63d: #184 makes Core the owner of the API-11 file changes. It checks
+# the params of the seven methods strictly before routing them (one spelling of a path, the
+# target in the same root and not inside the source, the fields of each kind), adds kind
+# "symlink" with linkTarget to workspace/create, and adds the kernel commands
+# workspace.createEntry, renameEntry, copyEntry and resolveEntry with the codes entry_not_found
+# and entry_exists, which the desktop calls for a plugin's create, rename, copy, trash and
+# saveAs (workbench/pluginfilechanges.go).
+# The plugin delta branch (#187) includes current Core main, including the
+# built-in file association catalog and plans (#186). It adds the pinned
+# companion index and verifies and reconstructs ZIPs for marketplace updates.
+# Lithe-core-rust main at 1310ee36 (PR #198): builds on c6cef0b (#187/#196), adds PR #197 hover Markdown
+# language preservation, and extends editor actions `actionIcons` with the four generic gutter
+# navigation icon tokens (`navigate-implemented`, `navigate-implementing`, `navigate-overridden`,
+# `navigate-overriding`).
+# Lithe-core-rust main at e8927412 (PR #200): closes the parent write handle on the SSH `-E` evidence
+# log before spawning `ssh.exe` so Win32-OpenSSH no longer fails with ERROR_SHARING_VIOLATION (32 /
+# Broken pipe), inherits owner-only DACL on PrivateDirectory, and keeps Evidence alive until
+# `end_transport` reaps the SSH process.
+# Lithe-core-rust main at 38c60be (#202): discovers local Docker
+# contexts, Podman and Windows WSL engines, prepares standard devcontainer configurations,
+# and preserves the selected context and distribution through build, connection and trust.
+# Lithe-core-rust main at c269c411 (#201): built-in rainbow bracket/variable colors,
+# indent guide preferences, and Unicode whole-identifier document highlights.
+PINNED_CORE_REVISION="c269c41153c8da2f2e8d064c68550a8f23260e2c"
 PROFILE="debug"
+CHECKOUT_ONLY="no"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --release) PROFILE="release"; shift ;;
         --debug) PROFILE="debug"; shift ;;
-        *) printf '%s\n' "Usage: $0 [--debug|--release]" >&2; exit 2 ;;
+        --checkout-only) CHECKOUT_ONLY="yes"; shift ;;
+        *) printf '%s\n' "Usage: $0 [--debug|--release|--checkout-only]" >&2; exit 2 ;;
     esac
 done
 
 HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 RUST_TARGET="${LITHE_CORE_TARGET:-$HOST_TARGET}"
-if [[ "$RUST_TARGET" == *-windows-msvc ]]; then
+# Preparing the checkout links nothing, so it works on an MSVC host as well.
+if [[ "$RUST_TARGET" == *-windows-msvc && "$CHECKOUT_ONLY" == "no" ]]; then
     printf '%s\n' "cgo cannot link the MSVC .lib archive for $RUST_TARGET; use x86_64-pc-windows-gnu for Windows." >&2
     exit 2
 fi
@@ -309,8 +408,15 @@ fi
 # cgo's external MinGW linker already supplies the Windows system import libraries.
 # winapi's supported switch avoids depending on libwinapi_* archives under a
 # Cargo registry/build-script directory that is not part of the staged Core.
+# When cross-compiling for x86_64-pc-windows-gnu from a non-Windows host (e.g. Linux CI),
+# default the MinGW-w64 cross toolchain so cc-rs and rustc link without extra host config.
 if [[ "$RUST_TARGET" == *-windows-gnu ]]; then
     export WINAPI_NO_BUNDLED_LIBRARIES=1
+    if [[ "$HOST_TARGET" != *-windows-* && "$RUST_TARGET" == "x86_64-pc-windows-gnu" ]]; then
+        export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-x86_64-w64-mingw32-gcc}"
+        export CC_x86_64_pc_windows_gnu="${CC_x86_64_pc_windows_gnu:-x86_64-w64-mingw32-gcc}"
+        export AR_x86_64_pc_windows_gnu="${AR_x86_64_pc_windows_gnu:-x86_64-w64-mingw32-ar}"
+    fi
 fi
 
 ARTIFACTS_DIR="$ROOT_DIR/.artifacts/desktop"
@@ -328,6 +434,48 @@ fi
 # tokio_macros and futures_macro. Build scripts and proc macros are never shipped, so they are
 # left unstripped; the static library is still built with the profile as the core defines it.
 export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP="${CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP:-false}"
+
+HELPER_EXE=""
+if [[ "$RUST_TARGET" == *windows* ]]; then
+    HELPER_EXE=".exe"
+fi
+RUSTC_VERSION="$(rustc -V)"
+
+format_identity() {
+    local revision="$1" dirty="$2" source="$3"
+    printf 'core-revision=%s\n' "$revision"
+    printf 'core-worktree=%s\n' "$dirty"
+    printf 'core-source=%s\n' "$source"
+    printf 'rustc=%s\n' "$RUSTC_VERSION"
+    printf 'target=%s\n' "$RUST_TARGET"
+    printf 'profile=%s\n' "$PROFILE"
+    if [[ "$RUST_TARGET" == *-windows-gnu ]]; then
+        printf 'winapi-import-libraries=mingw-system\n'
+    fi
+    if [[ "$RUST_TARGET" == *-apple-darwin ]]; then
+        printf 'macos-deployment-target=%s\n' "$MACOSX_DEPLOYMENT_TARGET"
+    fi
+}
+
+# Fast-path for pinned builds: when the staged archive, header, native-static-libs and lithe-mcp
+# helper already match this exact revision, rustc, target and profile, skip git and cargo.
+# Local LITHE_CORE_RUST_DIR overrides and --checkout-only never take this path. If a pinned
+# checkout already exists, require its rust/Cargo.toml to still be intact so a deleted worktree
+# manifest still fails closed.
+if [[ "$CHECKOUT_ONLY" == "no" && -z "${LITHE_CORE_RUST_DIR:-}" ]]; then
+    PINNED_SOURCE_DIR="$ARTIFACTS_DIR/lithe-core-rust/source"
+    EXPECTED_IDENTITY="$(format_identity "$PINNED_CORE_REVISION" "clean" "pinned")"
+    if [[ ( ! -d "$PINNED_SOURCE_DIR/.git" || -f "$PINNED_SOURCE_DIR/rust/Cargo.toml" ) \
+        && -f "$STAGE_DIR/identity.txt" \
+        && "$(cat "$STAGE_DIR/identity.txt")" == "$EXPECTED_IDENTITY" \
+        && -s "$STAGE_DIR/lib/liblithe_core.a" \
+        && -s "$STAGE_DIR/include/lithe_core.h" \
+        && -s "$STAGE_DIR/native-static-libs.txt" \
+        && -x "$STAGE_DIR/bin/lithe-mcp$HELPER_EXE" ]]; then
+        printf '%s\n' "$STAGE_DIR"
+        exit 0
+    fi
+fi
 
 if [[ -n "${LITHE_CORE_RUST_DIR:-}" ]]; then
     CORE_DIR="$(cd "$LITHE_CORE_RUST_DIR" && pwd -P)"
@@ -356,6 +504,10 @@ if [[ ! -f "$MANIFEST" ]]; then
     exit 1
 fi
 MANIFEST_NATIVE="$(native_path "$MANIFEST")"
+if [[ "$CHECKOUT_ONLY" == "yes" ]]; then
+    printf '%s\n' "$CORE_DIR"
+    exit 0
+fi
 
 CORE_REVISION="$(git -C "$CORE_DIR" rev-parse HEAD)"
 CORE_DIRTY="clean"
@@ -407,13 +559,48 @@ fi
 install -m 0644 "$LIBRARY_DIR/liblithe_core.a" "$STAGE_DIR/lib/liblithe_core.a"
 install -m 0644 "$CORE_DIR/rust/crates/core/include/lithe_core.h" "$STAGE_DIR/include/lithe_core.h"
 
+# On Windows GNU targets, copy any Cargo-supplied native import archives referenced by
+# native-static-libs.txt into $STAGE_DIR/lib/ so the staged directory is self-contained and can
+# be produced by Linux cross-compilation and linked on Windows without carrying target/.
+if [[ "$RUST_TARGET" == *-windows-gnu ]]; then
+    CARGO_BUILD_ROOT="$LIBRARY_DIR/build"
+    NATIVE_STATIC_LIBS="$(<"$NATIVE_LIBS_FILE")"
+    read -r -a NATIVE_ARGS <<< "$NATIVE_STATIC_LIBS"
+    FOUND_NAMES=()
+    FOUND_ARCHIVES=()
+    for output in "$CARGO_BUILD_ROOT"/*/output; do
+        [[ -f "$output" ]] || continue
+        while IFS= read -r line; do
+            line="${line%$'\r'}"
+            case "$line" in
+                cargo:rustc-link-search=native=*) native_dir="${line#cargo:rustc-link-search=native=}" ;;
+                cargo::rustc-link-search=native=*) native_dir="${line#cargo::rustc-link-search=native=}" ;;
+                *) continue ;;
+            esac
+            if command -v cygpath >/dev/null 2>&1; then
+                native_dir="$(cygpath -u "$native_dir")"
+            fi
+            for arg in "${NATIVE_ARGS[@]}"; do
+                case "$arg" in -l*) lib_name="${arg#-l}" ;; *) continue ;; esac
+                archive="$native_dir/lib$lib_name.a"
+                [[ -f "$archive" ]] || continue
+                for i in "${!FOUND_NAMES[@]}"; do
+                    if [[ "${FOUND_NAMES[$i]}" == "$lib_name" ]] && ! cmp -s "$archive" "${FOUND_ARCHIVES[$i]}"; then
+                        printf 'Conflicting Cargo import libraries for %s: %s and %s\n' "$lib_name" "$archive" "${FOUND_ARCHIVES[$i]}" >&2
+                        exit 1
+                    fi
+                done
+                FOUND_NAMES+=("$lib_name")
+                FOUND_ARCHIVES+=("$archive")
+                install -m 0644 "$archive" "$STAGE_DIR/lib/lib$lib_name.a"
+            done
+        done < "$output"
+    done
+fi
+
 # The IDE API helper is the lithe-ide-host crate's lithe-mcp binary from the same pinned
 # checkout. It is staged here so packaging can embed it; nothing at runtime reads this
 # directory, and the installed client runs only the copy it installs under application data.
-HELPER_EXE=""
-if [[ "$RUST_TARGET" == *windows* ]]; then
-    HELPER_EXE=".exe"
-fi
 mkdir -p "$STAGE_DIR/bin"
 cargo build --manifest-path "$MANIFEST_NATIVE" -p lithe-ide-host --bin lithe-mcp --features mcp \
     "${PROFILE_ARGS[@]+"${PROFILE_ARGS[@]}"}" >&2
@@ -423,18 +610,5 @@ if [[ ! -f "$HELPER" ]]; then
     exit 1
 fi
 install -m 0755 "$HELPER" "$STAGE_DIR/bin/lithe-mcp$HELPER_EXE"
-{
-    printf 'core-revision=%s\n' "$CORE_REVISION"
-    printf 'core-worktree=%s\n' "$CORE_DIRTY"
-    printf 'core-source=%s\n' "$CORE_SOURCE"
-    printf 'rustc=%s\n' "$(rustc -V)"
-    printf 'target=%s\n' "$RUST_TARGET"
-    printf 'profile=%s\n' "$PROFILE"
-    if [[ "$RUST_TARGET" == *-windows-gnu ]]; then
-        printf 'winapi-import-libraries=mingw-system\n'
-    fi
-    if [[ "$RUST_TARGET" == *-apple-darwin ]]; then
-        printf 'macos-deployment-target=%s\n' "$MACOSX_DEPLOYMENT_TARGET"
-    fi
-} > "$STAGE_DIR/identity.txt"
+format_identity "$CORE_REVISION" "$CORE_DIRTY" "$CORE_SOURCE" > "$STAGE_DIR/identity.txt"
 printf '%s\n' "$STAGE_DIR"

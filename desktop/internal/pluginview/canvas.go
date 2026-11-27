@@ -4,6 +4,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
@@ -299,7 +300,7 @@ func (r *renderer) zoomButtons(c ui.C, state *canvasState) {
 			Hover(ui.Look{}.Background(p.Hover)).Pressed(ui.Look{}.Background(p.Selection)).
 			Tooltip(i18n.Shared(language, "desktop.pluginView.resetZoom"))
 		button.Children(func() {
-			ui.Text(k, percent).FontSize(11).Weight(gfx.WeightMedium).Mono().Color(p.Text)
+			ui.Text(c, percent).FontSize(11).Weight(gfx.WeightMedium).Mono().Color(p.Text)
 		})
 		if button.Clicked() {
 			zoomTo(1)
@@ -368,7 +369,12 @@ func (s *canvasState) paint(d *ui.DrawContext) {
 	at := place{ox: float64(d.Rect.X) - s.x*k, oy: float64(d.Rect.Y) - s.y*k, k: k}
 	pt.shapes(n.Nodes, at, d.Opacity)
 	if s.tip != "" && s.hover >= 0 && d.Canvas.Now()-s.since >= canvasTooltipDelay {
-		pt.tooltip(s.tip, s.anchor)
+		// Full text takes priority over the group's description while the pointer
+		// rests on an ellipsized label. The page owns that shared tooltip.
+		page := d.Frame.GetPage()
+		if page == nil || page.HoveredText().Text == "" {
+			pt.tooltip(s.tip, s.anchor)
+		}
 	}
 }
 
@@ -534,9 +540,13 @@ func (pt *painter) text(sh *Shape, at place, opacity float32) {
 	for _, run := range runs {
 		total += canvas.TextWidthStyle(run.Text, style)
 	}
+	// Only a line wider than maxWidth is cut. The room left after some runs is a float32
+	// difference that can come out a hair under the next run's own width, so a line that
+	// fits must not fit its runs into that room.
 	room := total
-	if sh.MaxWidth > 0 {
-		room = min(total, float32(sh.MaxWidth*at.k))
+	cut := sh.MaxWidth > 0 && float32(sh.MaxWidth*at.k) < total
+	if cut {
+		room = float32(sh.MaxWidth * at.k)
 	}
 	x, baseline := at.point(sh.X, sh.Y)
 	switch sh.Align {
@@ -547,6 +557,7 @@ func (pt *painter) text(sh *Shape, at place, opacity float32) {
 	}
 	height := float32(math.Ceil(float64(size) * 1.5))
 	left := room
+	first := len(canvas.Texts())
 	for _, run := range runs {
 		if left <= 0 {
 			break
@@ -559,13 +570,31 @@ func (pt *painter) text(sh *Shape, at place, opacity float32) {
 		}
 		style.Color = fade(color, opacity)
 		value, width := run.Text, canvas.TextWidthStyle(run.Text, style)
-		if width > left {
+		if cut && width > left {
 			value = pt.fit(value, style, left)
 			width = left
 		}
 		canvas.LabelAlignedOnBaseline(value, gfx.Rect{X: x, Width: width + 1, Height: height}, baseline, style, gfx.AlignLeft)
 		x += width
 		left -= width
+	}
+	if cut && len(canvas.Texts()) > first {
+		full := sh.Text
+		if len(sh.Runs) > 0 {
+			if sh.fullText == "" {
+				var text strings.Builder
+				for _, run := range sh.Runs {
+					text.WriteString(run.Text)
+				}
+				sh.fullText = text.String()
+			}
+			full = sh.fullText
+		}
+		// The canvas resolves the font's real baseline; use the line box it
+		// painted so the hover region follows proportional and mono text alike.
+		bounds := canvas.Texts()[first].Bounds
+		bounds.Width = room
+		canvas.HoverHint(0, bounds, full)
 	}
 }
 

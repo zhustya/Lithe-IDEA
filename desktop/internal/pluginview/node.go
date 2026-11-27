@@ -47,6 +47,9 @@ type Node struct {
 	Columns []Column   `json:"columns,omitempty"`
 	Rows    [][]string `json:"rows,omitempty"`
 	Tool    string     `json:"tool,omitempty"`
+	// Choose makes a tool row in a settings region also the tool's picker.
+	Choose bool   `json:"choose,omitempty"`
+	Cursor string `json:"cursor,omitempty"`
 	// Height, ViewBox, Pan, Zoom, On and Nodes describe a canvas.
 	Height  float64     `json:"height,omitempty"`
 	ViewBox [4]float64  `json:"viewBox,omitempty"`
@@ -65,14 +68,15 @@ type Option struct {
 // Item is a keyValue pair (Label, Value, Tone) or a tree item (ID, Label, Icon,
 // Detail, Expanded, Children).
 type Item struct {
-	ID       string `json:"id,omitempty"`
-	Label    string `json:"label"`
-	Value    string `json:"value,omitempty"`
-	Tone     string `json:"tone,omitempty"`
-	Icon     string `json:"icon,omitempty"`
-	Detail   string `json:"detail,omitempty"`
-	Expanded bool   `json:"expanded,omitempty"`
-	Children []Item `json:"children,omitempty"`
+	ID          string `json:"id,omitempty"`
+	Label       string `json:"label"`
+	Value       string `json:"value,omitempty"`
+	Tone        string `json:"tone,omitempty"`
+	Icon        string `json:"icon,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+	Expanded    bool   `json:"expanded,omitempty"`
+	HasChildren bool   `json:"hasChildren,omitempty"`
+	Children    []Item `json:"children,omitempty"`
 }
 
 // Column is one column of a table.
@@ -124,6 +128,9 @@ type Shape struct {
 
 	// geometry is the parsed path, made on first draw and kept with the decoded view.
 	geometry *pathGeometry
+	// fullText joins colored runs only when first needed by an overflow tooltip.
+	// Shapes belong to an immutable decoded view, so later paints reuse it.
+	fullText string
 }
 
 // Run is one differently colored part of a text node.

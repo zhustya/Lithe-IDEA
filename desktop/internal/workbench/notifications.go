@@ -24,14 +24,17 @@ const (
 // notification is one notice of the history. Notices with the same text and kind are one
 // entry that counts how often it came.
 type notification struct {
-	id    int
-	text  string
-	kind  ui.ToastKind
-	count int
+	id     int
+	text   string
+	detail string
+	kind   ui.ToastKind
+	count  int
 	// at is when it came last.
 	at time.Time
 	// unread says it came after the history was last looked at.
 	unread bool
+	// merge allows a later identical notice to replace this notice's action.
+	merge bool
 	// toast is the toast that shows it, which may have gone by itself already.
 	toast ui.ToastID
 	// op is the user action the failure was last reported under, empty when it never came
@@ -39,9 +42,11 @@ type notification struct {
 	// on that action's records.
 	op string
 	// act is what the notice's own button does, labeled actLabel, nil for a notice without
-	// one; it runs on the workbench the notice is on. A notice with act offers no View Logs.
-	act      func(*App)
-	actLabel string
+	// one; it runs on the workbench the notice is on. A notice with an action offers no View Logs.
+	act               func(*App)
+	actLabel          string
+	secondaryAct      func(*App)
+	secondaryActLabel string
 }
 
 // notificationCenter owns the history shared by the tool window and the status popover.
@@ -110,11 +115,31 @@ func (a *App) notifyKind(message string, kind ui.ToastKind) {
 // notifyAction is notifyKind with a button of the notice's own, label, which runs act. A
 // repeat of the notice keeps the latest button.
 func (a *App) notifyAction(message string, kind ui.ToastKind, label string, act func(*App)) {
-	a.notice = message
+	a.notifyActions(message, "", kind, label, act, "", nil)
+}
+
+// notifyActions is notifyKind with optional wrapped detail text and up to two notice-specific
+// buttons. The floating toast shows the primary button while the notification history shows both.
+func (a *App) notifyActions(title, detail string, kind ui.ToastKind, label string, act func(*App), secondaryLabel string, secondaryAct func(*App)) {
+	a.recordNotification(title, detail, kind, label, act, secondaryLabel, secondaryAct, true)
+}
+
+// notifyOperationAction keeps a separate history entry for every operation. Identical
+// summaries can reopen different results and must keep their own callbacks.
+func (a *App) notifyOperationAction(title, detail, label string, act func(*App)) {
+	a.recordNotification(title, detail, ui.ToastError, label, act, "", nil, false)
+}
+
+func (a *App) recordNotification(title, detail string, kind ui.ToastKind, label string, act func(*App), secondaryLabel string, secondaryAct func(*App), merge bool) {
+	if detail != "" {
+		a.notice = detail
+	} else {
+		a.notice = title
+	}
 	center := &a.notifications
 	var entry *notification
 	for i, existing := range center.list {
-		if existing.text == message && existing.kind == kind {
+		if merge && existing.text == title && existing.detail == detail && existing.kind == kind && existing.merge {
 			entry = existing
 			center.list = append(center.list[:i], center.list[i+1:]...)
 			a.overlay.toaster.Close(existing.toast)
@@ -122,11 +147,12 @@ func (a *App) notifyAction(message string, kind ui.ToastKind, label string, act 
 		}
 	}
 	if entry == nil {
-		entry = &notification{text: message, kind: kind}
+		entry = &notification{text: title, detail: detail, kind: kind, merge: merge}
 	}
 	entry.count++
 	entry.at = a.now()
 	entry.act, entry.actLabel = act, label
+	entry.secondaryAct, entry.secondaryActLabel = secondaryAct, secondaryLabel
 	entry.unread = !center.open
 	if kind == ui.ToastError && a.op.id != "" {
 		entry.op = a.op.id
@@ -142,7 +168,7 @@ func (a *App) notifyAction(message string, kind ui.ToastKind, label string, act 
 	case a.viewsLogs(entry):
 		action = i18n.Shared(a.language(), "desktop.notifications.viewLogs")
 	}
-	entry.toast = a.overlay.toaster.ShowAction(a.notificationText(entry), "", kind, action)
+	entry.toast = a.overlay.toaster.ShowAction(a.notificationText(entry), entry.detail, kind, action)
 	if entry.id == 0 {
 		// Keep the first toast's identity when a repeat replaces the current toast.
 		entry.id = int(entry.toast)
@@ -152,7 +178,7 @@ func (a *App) notifyAction(message string, kind ui.ToastKind, label string, act 
 // viewsLogs says the notice offers View Logs: it refers to an action's records and there is a
 // log window to show them in.
 func (a *App) viewsLogs(entry *notification) bool {
-	return entry.act == nil && entry.op != "" && a.logs != nil
+	return entry.act == nil && entry.secondaryAct == nil && entry.op != "" && a.logs != nil
 }
 
 // notificationActed runs the button of the notice whose toast this paint delivered a press on:
@@ -228,7 +254,13 @@ func (a *App) notificationsToolBody(c ui.C) {
 	list := &center.toolList
 	if list.Key == nil {
 		list.Key = func(i int) int { return center.list[i].id }
-		list.Label = func(i int) string { return center.list[i].text }
+		list.Label = func(i int) string {
+			entry := center.list[i]
+			if entry.detail != "" {
+				return entry.text + " — " + entry.detail
+			}
+			return entry.text
+		}
 	}
 	label := i18n.Shared(a.language(), "desktop.notifications.title")
 	ui.List(c, list, len(center.list), func(row ui.ListRow) {
@@ -256,7 +288,7 @@ func (a *App) notificationBell(c ui.C) {
 		if unread > 0 {
 			color = a.colors.Text
 		}
-		ui.Icon(k, icons.Bell).Size(chromeMarkSize, chromeMarkSize).Color(color)
+		ui.Icon(c, icons.Bell).Size(chromeMarkSize, chromeMarkSize).Color(color)
 		if unread > 0 {
 			a.chromeStatusLabel(k, strconv.Itoa(unread))
 		}
@@ -281,7 +313,7 @@ func (a *App) notificationPanel(c ui.C, anchor ui.Box) {
 		align = ui.Start
 	}
 	spec := ui.PopoverSpec{Side: components.PopoverTop, Align: align, Offset: chromeMenuOffset, Width: notificationPanelWidth, ConsumeOutsidePress: true}
-	ui.PopoverWith(c, anchor, spec, &center.open, func() {
+	ui.Popover(c, anchor, &center.open, spec, func() {
 		ui.Row(c).FillWidth().Height(28).Items(ui.Center).Gap(8).Children(func() {
 			ui.Text(c, i18n.Shared(language, "desktop.notifications.title")).Weight(gfx.WeightSemibold).Grow(1).Ellipsis()
 			a.notificationClearButton(c)
@@ -310,22 +342,31 @@ func (a *App) notificationRow(c ui.C, row ui.Box, entry *notification) {
 
 // notificationEntry declares a notice of the history: its words, when it came last and how
 // often, and View Logs when it refers to an action's records.
-func (a *App) notificationEntry(k ui.C, entry *notification) {
+func (a *App) notificationEntry(c ui.C, entry *notification) {
 	language := a.language()
-	ui.Wrap(k, entry.text).FontSize(a.theme.Metrics.FontSizeS)
+	if entry.detail != "" {
+		ui.Wrap(c, entry.text).FontSize(a.theme.Metrics.FontSizeS).Weight(gfx.WeightMedium)
+		ui.Wrap(c, entry.detail).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle)
+	} else {
+		ui.Wrap(c, entry.text).FontSize(a.theme.Metrics.FontSizeS)
+	}
 	meta := entry.at.Format("15:04:05")
 	if entry.count > 1 {
 		meta = i18n.SharedFormat(language, "desktop.notifications.meta", map[string]string{"time": meta, "count": strconv.Itoa(entry.count)})
 	}
-	ui.Row(k).FillWidth().Items(ui.Center).Gap(8).Children(func() {
-		ui.Text(k, meta).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Grow(1).Ellipsis()
-		if entry.act != nil && ui.Button(k.Part("act"), entry.actLabel).Ghost().Small().Clicked() {
+	ui.Row(c).FillWidth().Items(ui.Center).Gap(8).Children(func() {
+		ui.Text(c, meta).FontSize(a.theme.Metrics.FontSizeS).Color(a.colors.Subtle).Grow(1).Ellipsis()
+		if entry.act != nil && ui.Button(c.Part("act"), entry.actLabel).Ghost().Small().Shrink(0).Clicked() {
 			act := entry.act
-			k.After(func() { a.notificationAct(act) })
+			c.After(func() { a.notificationAct(act) })
 		}
-		if a.viewsLogs(entry) && ui.Button(k.Part("logs"), i18n.Shared(language, "desktop.notifications.viewLogs")).Ghost().Small().Clicked() {
+		if entry.secondaryAct != nil && ui.Button(c.Part("secondary"), entry.secondaryActLabel).Ghost().Small().Shrink(0).Clicked() {
+			act := entry.secondaryAct
+			c.After(func() { a.notificationAct(act) })
+		}
+		if a.viewsLogs(entry) && ui.Button(c.Part("logs"), i18n.Shared(language, "desktop.notifications.viewLogs")).Ghost().Small().Shrink(0).Clicked() {
 			op := entry.op
-			k.After(func() { a.viewNotificationLogs(op) })
+			c.After(func() { a.viewNotificationLogs(op) })
 		}
 	})
 }

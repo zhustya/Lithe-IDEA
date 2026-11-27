@@ -151,14 +151,31 @@ type everywhereSearch struct {
 	pending                  []string
 }
 
+// everywhereActionsOnly reports whether Search Everywhere offers only actions in p: a file
+// opened on its own has no folder to search. A remote workspace searches the host's folder.
+func (p *project) everywhereActionsOnly() bool {
+	return p.standalone
+}
+
 func (a *App) openEverywhere(p *project) {
 	if a.everywhereView.open {
 		a.focusEverywhere(p)
 		return
 	}
+	a.openEverywhereWithQuery(p, "")
+}
+
+// openEverywhereWithQuery opens Search Everywhere with query prefilled and focused.
+func (a *App) openEverywhereWithQuery(p *project, query string) {
+	if p == nil {
+		return
+	}
 	a.everywhereView.open = true
 	a.everywhereView.scope = 0
-	a.everywhereView.query.SetText("")
+	if p.everywhereActionsOnly() {
+		a.everywhereView.scope = everywhereScopeActions
+	}
+	a.everywhereView.query.SetText(query)
 	p.everywhere.selected = 0
 	a.focusEverywhere(p)
 }
@@ -208,6 +225,9 @@ func (a *App) closeEverywhere(p *project) {
 
 func (a *App) updateEverywhere(p *project, query string, scope int) {
 	v, s := &a.everywhereView, &p.everywhere
+	if p.everywhereActionsOnly() {
+		scope = everywhereScopeActions
+	}
 	options := v.options(scope)
 	if s.query == query && s.scope == scope && s.options == options {
 		return
@@ -258,7 +278,8 @@ func (a *App) startEverywhereWatch(p *project) {
 		a.startProjectSearchWatch(p)
 	} else if p.search.watchReady {
 		s.watchReady, s.watchAvailable, s.fullResync = true, p.search.watchAvailable, true
-		if !s.watchAvailable {
+		// The host watch of a remote workspace tells the user itself (remoteWatchUnavailable).
+		if !s.watchAvailable && p.remote == nil {
 			_, _, err := p.search.watch.state()
 			if err != nil {
 				a.operationFailed("workspace_search_everywhere_watch", err)
@@ -288,29 +309,31 @@ func (a *App) applyEverywhereWatch(p *project, ready, available bool, err error,
 		s.pending = nil
 		changed = true
 	} else if len(events.Names) > 0 {
-		if len(s.pending)+len(events.Names) > searchEventLimit {
-			a.backgroundFailed("workspace_search_incremental_update", errWatchEventLimit)
-			s.pending, s.fullResync = nil, true
-		} else if !s.fullResync {
-			s.pending = append(s.pending, events.Names...)
-		}
+		a.queueSearchChanges(&s.pending, &s.fullResync, events.Names)
 		changed = true
 	}
 	if changed {
-		if !p.everywhereSymbols.discovering {
-			p.everywhereSymbols.discoveryStarted = false
-			a.discoverEverywhereLanguages(p)
-		}
-		s.generation++
-		if s.cancel != nil {
-			s.cancel()
-		}
-		if strings.TrimSpace(s.query) != "" {
-			s.loading = true
-		}
+		a.everywhereOutdated(p)
 	}
 	if s.watchReady && !s.running && strings.TrimSpace(s.query) != "" {
 		a.runEverywhere(p, false)
+	}
+}
+
+// everywhereOutdated drops the Search Everywhere query running after the folder changed, and
+// looks for the folder's languages again; the caller runs the query again.
+func (a *App) everywhereOutdated(p *project) {
+	s := &p.everywhere
+	if !p.everywhereSymbols.discovering {
+		p.everywhereSymbols.discoveryStarted = false
+		a.discoverEverywhereLanguages(p)
+	}
+	s.generation++
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if strings.TrimSpace(s.query) != "" {
+		s.loading = true
 	}
 }
 
@@ -329,7 +352,7 @@ func (a *App) runEverywhere(p *project, next bool) {
 	}
 	full, paths := false, []string(nil)
 	if !next {
-		full, paths = s.fullResync || !s.watchAvailable, s.pending
+		full, paths = s.fullResync || !s.watchAvailable || p.remoteWatchMisses(request.IncludeGenerated), s.pending
 		s.fullResync, s.pending = false, nil
 	}
 	p.search.indexUsed = true
@@ -388,7 +411,7 @@ func (a *App) finishEverywhere(p *project, generation uint64, next bool, page co
 	}
 	if generation != s.generation {
 		if err != nil && !errors.Is(err, context.Canceled) {
-			a.backgroundFailed("workspace_search_everywhere", err)
+			a.backgroundFailed("workspace_search_everywhere", p.logError(err))
 		}
 		if s.watchReady && a.everywhereView.open && strings.TrimSpace(s.query) != "" {
 			a.runEverywhere(p, false)
@@ -406,7 +429,7 @@ func (a *App) finishEverywhere(p *project, generation uint64, next bool, page co
 				return
 			}
 			s.failed = true
-			a.operationFailed("workspace_search_everywhere", err)
+			a.operationFailed("workspace_search_everywhere", p.logError(err))
 		}
 		return
 	}

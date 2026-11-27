@@ -542,7 +542,7 @@ func TestRuntimePreparationOwnsLanguageServerStartUntilCancelledProcessStops(t *
 	var startErr error
 	go func() {
 		defer close(startDone)
-		_, startErr = service.StartLanguageServer(work, []pluginmanager.Entry{entry}, "fixture", BackendRequest{Architecture: core.PluginArchitecture()})
+		_, startErr = service.StartLanguageServer(work, []pluginmanager.Entry{entry}, "fixture", BackendRequest{Architecture: core.PluginArchitecture(), ProjectCodeAllowed: true})
 	}()
 	t.Cleanup(func() { cancelWork(); release(); joinRuntimeWorker(t, startDone, "late language-server start") })
 	select {
@@ -585,8 +585,12 @@ func TestRuntimeInstallationAdmissionCoversPublicationAfterPreparation(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	var finishOnce sync.Once
-	release := func() { finishOnce.Do(finish) }
+	finishOnce := sync.OnceValue(finish)
+	release := func() {
+		if err := finishOnce(); err != nil {
+			t.Error(err)
+		}
+	}
 	t.Cleanup(release)
 	// Preparation has finished, but the approved operation still owns publication.
 	uninstallDone := make(chan struct{})

@@ -39,6 +39,9 @@ func (a *App) semanticPopups(c ui.C) {
 	state := &a.semantics
 	if p := a.project; p != nil {
 		a.codeActionLightbulb(c, p, p.selectedDocument(p.docs.group))
+		if !state.rename.open && !state.codeActions.open && !state.definition.open {
+			a.editorActionHoverPopup(c, p, p.selectedDocument(p.docs.group))
+		}
 	}
 	if a.project == nil || state.project != a.project {
 		return
@@ -95,7 +98,13 @@ func (a *App) definitionPopup(c ui.C) {
 		a.closeSemanticDefinition()
 		return
 	}
-	anchor, ok := d.caretView().CaretRect()
+	var anchor gfx.Rect
+	var ok bool
+	if state.anchor != nil {
+		anchor, ok = *state.anchor, true
+	} else {
+		anchor, ok = d.caretView().CaretRect()
+	}
 	if !ok {
 		a.closeSemanticDefinition()
 		return
@@ -147,7 +156,7 @@ func completionSummary(value string) (string, bool) {
 func (a *App) completionPopup(c ui.C) gfx.Rect {
 	state := &a.semantics.completion
 	p, d := a.currentSemanticDocument(state.documentID)
-	if d == nil || p != a.project || d.view.Revision() != state.revision {
+	if p != a.project || !completionPositionCurrent(d, state.revision, state.line, state.column) {
 		a.closeSemanticCompletion()
 		return gfx.Rect{}
 	}
@@ -350,7 +359,7 @@ func (a *App) renameDialog(c ui.C) {
 	language := a.language()
 	label := i18n.Shared(language, "desktop.semantics.renameName")
 	submitted, cancelled, confirmed := false, false, false
-	closed := ui.ModalWith(c, &state.open, i18n.Shared(language, "desktop.semantics.renameTitle"),
+	closed := ui.Modal(c, &state.open, i18n.Shared(language, "desktop.semantics.renameTitle"),
 		ui.ModalSpec{Description: i18n.Shared(language, "desktop.semantics.renameDescription"), Width: 420}, func() {
 			submitted = ui.TextField(c, &state.name, label, label).FillWidth().Disabled(state.busy).Submitted()
 		}, func() {

@@ -140,6 +140,10 @@ func (a *App) openTreeRemoval(p *project, paths []string) {
 // deletes them from disk. The open files at or below them are saved and their tabs closed first,
 // so neither loses an edit.
 func (a *App) removeTreeItems(p *project, paths []string, permanent bool) {
+	if p.remote != nil {
+		a.remoteRemoveTreeItems(p, paths, permanent)
+		return
+	}
 	full, docs := a.removalPaths(p, paths)
 	parents := treeParents(paths)
 	remove, performed, failure := treeMoveToTrash, "workspace.file.trash", trashFailedText
@@ -224,7 +228,7 @@ func (a *App) treeRemovalDialog(c ui.C, p *project) {
 		})
 		open = false
 	}
-	closed := ui.ModalWith(c, &open, title, ui.ModalSpec{Description: description, Width: 440}, nil, func() {
+	closed := ui.Modal(c, &open, title, ui.ModalSpec{Description: description, Width: 440}, nil, func() {
 		if ui.Button(c, i18n.Shared(lang, "desktop.files.cancel")).Outline().Clicked() {
 			open = false
 		}

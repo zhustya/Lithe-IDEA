@@ -140,6 +140,31 @@ func TestClosingAProjectTabShowsTheNextTab(t *testing.T) {
 	}
 }
 
+// A size the user gave the settings window from one project tab is every tab's: the next
+// settings window opens at it from another tab, and a save of that tab's settings keeps it.
+func TestSettingsWindowSizeIsEveryProjectTabs(t *testing.T) {
+	h, alpha, beta := newTabsHarness(t)
+	h.open(alpha)
+	h.app.openProject(beta)
+	h.settleTabs()
+	second := h.app.sessions.active
+	if second == h.app {
+		t.Fatal("beta did not open in a second tab")
+	}
+	h.app.setSettingsWindowSize(1100, 760)
+	if got := second.settings; got.SettingsWindowWidth != 1100 || got.SettingsWindowHeight != 760 {
+		t.Fatalf("beta's tab would open the settings window at %dx%d, want 1100x760", got.SettingsWindowWidth, got.SettingsWindowHeight)
+	}
+	second.setLanguage("zh-Hans")
+	var saved settings
+	if found, err := h.store.Load(settingsFile, &saved); err != nil || !found {
+		t.Fatalf("load saved settings: found=%v err=%v", found, err)
+	}
+	if saved.SettingsWindowWidth != 1100 || saved.SettingsWindowHeight != 760 || saved.Language != "zh-Hans" {
+		t.Fatalf("a save from beta's tab kept %dx%d, language %q; want 1100x760, zh-Hans", saved.SettingsWindowWidth, saved.SettingsWindowHeight, saved.Language)
+	}
+}
+
 // Closing the window closes the project of every tab, and the window closes only once all of
 // them have.
 func TestClosingTheWindowClosesEveryProjectTab(t *testing.T) {
@@ -153,5 +178,41 @@ func TestClosingTheWindowClosesEveryProjectTab(t *testing.T) {
 	h.await("the window to be allowed to close", func() bool { return allowed })
 	if h.app.project != nil || second.project != nil {
 		t.Fatalf("alpha open = %v, beta open = %v", h.app.project != nil, second.project != nil)
+	}
+}
+
+// Every project tab uses the one web host that the real window initialized, even after the
+// first project closes. A different window must still wait for its own initialization.
+func TestProjectTabsShareWindowWebHost(t *testing.T) {
+	h, alpha, beta := newTabsHarness(t)
+	host := h.config.Web
+	if host == nil || host.OnReady == nil || h.app.previewWeb() {
+		t.Fatal("the window must provide a web host and wait for its ready callback")
+	}
+	host.OnReady()
+	h.open(alpha)
+	h.app.openProject(beta)
+	h.settleTabs()
+	s := h.app.sessions
+	second := s.active
+	if second == h.app || s.of(second).Web != host {
+		t.Fatal("the second project tab does not use the window's initialized web host")
+	}
+	if !h.app.previewWeb() || !second.previewWeb() {
+		t.Fatal("web previews do not share the window's ready state")
+	}
+	h.app.closeProject()
+	h.await("the first project tab to close", func() bool { return len(s.list) == 1 })
+	if s.active != second || s.of(second).Web != host || !second.previewWeb() {
+		t.Fatal("closing the first project discarded the remaining tab's web host")
+	}
+	s.openTab(alpha)
+	h.settleTabs()
+	if s.active == second || s.of(s.active).Web != host || !s.active.previewWeb() {
+		t.Fatal("a project opened after the first tab closed lost the window's web host")
+	}
+	other := newHarness(t, &testKernel{Client: core.NewClient()})
+	if other.config.Web == host || other.app.previewWeb() {
+		t.Fatal("a different window borrowed this window's web host or ready state")
 	}
 }

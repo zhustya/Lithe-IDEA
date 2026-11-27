@@ -16,7 +16,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/1lck/Lithe-IDEA/desktop/internal/atomicfile"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/configfile"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/filelock"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/marketplace"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/pluginpkg"
 )
@@ -30,6 +32,9 @@ var (
 	ErrArtifact = errors.New("managed runtime artifact is not usable")
 	ErrArchive  = errors.New("managed runtime archive is not safe to extract")
 	ErrBusy     = errors.New("managed runtime preparation is busy")
+	// ErrDownload means no URL of the artifact delivered its archive; it wraps the last
+	// URL's failure, such as marketplace.ErrArchiveChecksum for bytes that do not match.
+	ErrDownload = errors.New("managed runtime archive could not be downloaded")
 )
 
 // Artifact is the selected platform artifact returned by Core. All paths are
@@ -166,8 +171,14 @@ func (m *Manager) Prepare(ctx context.Context, artifact Artifact, validate func(
 	if err != nil {
 		return result, err
 	}
-	unlock, err := acquire(ctx, filepath.Join(base, ".lock"))
+	unlock, err := filelock.Acquire(ctx, filepath.Join(base, ".lock"))
 	if err != nil {
+		switch {
+		case errors.Is(err, filelock.ErrInvalid):
+			err = fmt.Errorf("%w: %w", ErrArtifact, err)
+		case errors.Is(err, filelock.ErrBusy):
+			err = fmt.Errorf("%w: %w", ErrBusy, err)
+		}
 		return result, err
 	}
 	defer func() { err = errors.Join(err, unlock()) }()
@@ -341,7 +352,7 @@ func removeAbandoned(ctx context.Context, base string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if strings.HasPrefix(entry.Name(), ".staging-") || strings.HasPrefix(entry.Name(), ".archive-") {
+		if strings.HasPrefix(entry.Name(), ".staging-") || strings.HasPrefix(entry.Name(), ".archive.") || strings.HasPrefix(entry.Name(), ".archive-") {
 			if err := os.RemoveAll(filepath.Join(base, entry.Name())); err != nil {
 				return err
 			}
@@ -380,33 +391,12 @@ func (m *Manager) archive(ctx context.Context, artifact Artifact, base string, p
 		return nil, err
 	}
 	defer func() { err = errors.Join(err, source.Close()) }()
-	temporary, err := os.CreateTemp(base, ".archive-")
-	if err != nil {
-		return nil, err
-	}
-	temporaryName := temporary.Name()
-	defer func() {
-		if temporary != nil {
-			err = errors.Join(err, temporary.Close())
+	if err := atomicfile.WriteWithCheck(path, 0o600, func(w io.Writer) error {
+		if _, err := io.Copy(w, contextReader{ctx, source}); err != nil {
+			return err
 		}
-		if cleanup := os.Remove(temporaryName); cleanup != nil && !errors.Is(cleanup, os.ErrNotExist) {
-			err = errors.Join(err, cleanup)
-		}
-	}()
-	if _, err := io.Copy(temporary, contextReader{ctx, source}); err != nil {
-		return nil, err
-	}
-	if err := temporary.Sync(); err != nil {
-		return nil, err
-	}
-	if err := temporary.Close(); err != nil {
-		return nil, err
-	}
-	temporary = nil
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if err := os.Rename(temporaryName, path); err != nil {
+		return ctx.Err()
+	}, ctx.Err); err != nil {
 		return nil, err
 	}
 	return openVerified(ctx, path, artifact.SHA256)

@@ -16,8 +16,15 @@ const gitTimeout = 30 * time.Second
 type gitState struct {
 	// loaded is set once the kernel answered, whether it succeeded or failed.
 	loaded bool
-	status core.GitStatus
-	err    error
+	// safeMode is set, with loaded, when the status was not read because the project is in safe
+	// mode: Core runs no Git there (#2208), and the Git views offer to trust the project.
+	safeMode bool
+	// remoteAbove is set, with loaded, when a remote workspace's folder lies inside a repository
+	// that starts above it on the host, which a remote workspace does not show yet
+	// (remoteRepositoryAbove).
+	remoteAbove bool
+	status      core.GitStatus
+	err         error
 	// tree is the same answer indexed for the project tree, which colors the rows of the
 	// changed paths. It is rebuilt whenever the status is replaced.
 	tree treeStatus
@@ -42,12 +49,36 @@ func (a *App) reloadGit(p *project) {
 // readGit reads the status of p under the context policy gives its request.
 func (a *App) readGit(p *project, policy func(context.Context) context.Context) {
 	generation := p.gitStatusGeneration.Add(1)
+	if p.safeMode() {
+		// The repository's configuration can name a program Git runs while it reads the status
+		// (core.fsmonitor), so safe mode reads none until the project is trusted
+		// (applyProjectTrust).
+		a.setGit(p, gitState{loaded: true, safeMode: true}, generation)
+		return
+	}
 	kernel, root := a.kernel, p.root
 	a.background(p, gitTimeout, func(ctx context.Context) func(*App) {
 		status, err := kernel.GitStatus(policy(ctx), root)
 		return func(a *App) {
 			wasRepo := p.git.isRepository()
-			if !a.setGit(p, gitState{loaded: true, status: status, err: err}, generation) {
+			g := gitState{loaded: true, status: status, err: err}
+			switch {
+			case core.IsGitUntrustedWorkspace(err):
+				// The trust was withdrawn while the read was on its way: Core ran no Git, and the
+				// views show safe mode rather than a failure.
+				g = gitState{loaded: true, safeMode: true}
+			case err == nil && remoteRepositoryAbove(p, status):
+				g = gitState{loaded: true, remoteAbove: true}
+			}
+			if !a.setGit(p, g, generation) {
+				return
+			}
+			if g.safeMode {
+				a.backgroundFailed("git_status_safe_mode", err)
+				return
+			}
+			if g.remoteAbove {
+				// log-exempt: 预期的缺失：远程工作区的文件夹在更上层的仓库里，Git 视图说明原因，不是失败。
 				return
 			}
 			if err != nil {

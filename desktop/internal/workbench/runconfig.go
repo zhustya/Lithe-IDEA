@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path"
 	"slices"
+	"strings"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
@@ -59,10 +60,11 @@ type runConfigState struct {
 	// beforeLaunch is the start that waits for the user to allow the steps a project file
 	// names before it (runconfig_before_launch.go).
 	beforeLaunch *beforeLaunchConfirmation
-	// start is the configuration a save asked to run, started once the next refresh lists it
-	// so the run reads what was saved.
-	start string
-	// findingEntrypoint says Run on Current File is asking the build providers for the open
+	// start is the configuration a save asked to start once the next refresh lists it.
+	// startAction is Debug for a discovered debug entrypoint and defaults to Run.
+	start       string
+	startAction titleAction
+	// findingEntrypoint says Current File is asking the build providers for the open
 	// file's entrypoint (title_run_entrypoints.go), so another press does not ask again.
 	findingEntrypoint bool
 	// browser is the list that shows the configurations by scope and build system.
@@ -85,15 +87,16 @@ func (s *runConfigState) configuration(id string) *core.RunConfiguration {
 }
 
 // providerRuns is the providerRuns snapshot of the instances whose model has loaded:
-// each target a run declaration applies to, under its workspace-relative project path.
-// ok is false while no model has loaded, so a refresh does not withdraw every detected
-// run before the models answer.
+// each target a provider run declaration applies to, plus each model run entry targeting
+// a declared runConfigurationType, under its workspace-relative project path.
+// ok is false while no declared model has loaded, so an instance with only tasks cannot
+// withdraw existing runs before the models answer.
 func providerRuns(instances []buildInstance) ([]core.RunProviderRun, bool) {
 	runs := []core.RunProviderRun{}
 	loaded := false
 	for index := range instances {
 		instance := &instances[index]
-		if !instance.modelLoaded {
+		if !instance.modelLoaded || instance.ModelSource == "" {
 			continue
 		}
 		loaded = true
@@ -109,15 +112,81 @@ func providerRuns(instances []buildInstance) ([]core.RunProviderRun, bool) {
 				runs = append(runs, core.RunProviderRun{
 					ProjectPath: path.Clean(path.Join(instance.Root, project.Path)),
 					Name:        run.EntryName(target.Name),
-					Reference: core.RunProviderReference{
+					Reference: &core.RunProviderReference{
 						PluginID: instance.PluginID, BuildSystemID: instance.BuildSystemID, Root: instance.Root,
 						Run: run.ID, ProjectID: project.ID, TargetID: target.ID, Execution: run.Execution, UserArguments: []string{},
 					},
 				})
 			}
 		}
+		for _, entry := range instance.Model.Run {
+			if entry.RunType == nil {
+				continue
+			}
+			cwd := entry.WorkingDirectory
+			if cwd == "" {
+				cwd = instance.Root
+			}
+			cwd = path.Clean(cwd)
+			projectPath := cwd
+			if project, ok := buildProjectByID(instance.Model, entry.BuildSystem.ProjectID); ok && project.Path != "" {
+				candidate := path.Clean(project.Path)
+				if cwd == "." || candidate == cwd || strings.HasPrefix(candidate, cwd+"/") {
+					projectPath = candidate
+				} else {
+					projectPath = path.Clean(path.Join(instance.Root, candidate))
+				}
+			}
+			runType := *entry.RunType
+			runs = append(runs, core.RunProviderRun{
+				ProjectPath: projectPath,
+				Name:        entry.Name,
+				CWD:         cwd,
+				Execution:   entry.Execution,
+				Selector:    entry.ID,
+				RunType:     &runType,
+			})
+		}
 	}
 	return runs, loaded
+}
+
+// generatedRunTypeConfigurationID finds the resolved generated `build.run-type`
+// configuration corresponding to a decoded BuildRunEntry.
+func (p *project) generatedRunTypeConfigurationID(entry core.BuildRunEntry) (string, bool) {
+	if entry.RunType == nil {
+		return "", false
+	}
+	wantKey := core.RunTypeKey{
+		PluginID:      entry.RunType.PluginID,
+		BuildSystemID: entry.RunType.BuildSystemID,
+		Type:          entry.RunType.Type,
+	}
+	wantJSON, _ := json.Marshal(entry.RunType)
+	fallback := ""
+	for index := range p.runConfigs.list {
+		cfg := &p.runConfigs.list[index]
+		if !strings.HasPrefix(cfg.ID, "generated:run-type:") {
+			continue
+		}
+		key, ok := cfg.RunTypeReference()
+		if !ok || key != wantKey {
+			continue
+		}
+		if cfg.Cwd == entry.WorkingDirectory {
+			var ref core.RunTypeReference
+			if json.Unmarshal(cfg.Extensions["build"], &ref) == nil {
+				gotJSON, _ := json.Marshal(&ref)
+				if string(gotJSON) == string(wantJSON) {
+					return cfg.ID, true
+				}
+			}
+		}
+		if fallback == "" && (cfg.Name == entry.Name || cfg.Name == entry.Name+" ("+entry.WorkingDirectory+")") {
+			fallback = cfg.ID
+		}
+	}
+	return fallback, fallback != ""
 }
 
 // refreshRunConfigurations has Core generate the runs the loaded models declare and
@@ -167,7 +236,7 @@ func (a *App) finishRunConfigurations(p *project, generation uint64, resolved co
 	a.loadRunConfigTypes(p, false)
 	if err != nil {
 		s.failure = err.Error()
-		s.reveal, s.start = "", ""
+		s.reveal, s.start, s.startAction = "", "", titleActionNone
 		return
 	}
 	s.failure = ""
@@ -204,10 +273,15 @@ func (a *App) finishRunConfigurations(p *project, generation uint64, resolved co
 	}
 	s.reveal = ""
 	if start := s.start; start != "" {
-		s.start = ""
+		action := s.startAction
+		s.start, s.startAction = "", titleActionNone
 		if s.configuration(start) != nil {
 			s.selected = start
-			a.runConfiguration(p, start)
+			if action == titleActionDebug {
+				a.titleStart(p, action)
+			} else {
+				a.runConfiguration(p, start)
+			}
 		}
 	}
 	if s.configuration(s.selected) == nil {
@@ -270,6 +344,14 @@ func (a *App) startRunConfigurationWith(p *project, id string, debug *connection
 		a.notifyError(message)
 		return nil, refuseBuild(refusalNotReady, message)
 	}
+	// A remote workspace runs its built-in process runs on its host; a debugger and the runs of
+	// plugins, which run on this computer, do not reach it yet.
+	if p.remote != nil && (debug != nil || !configuration.IsProcess()) {
+		message := i18n.Shared(a.language(), "desktop.run.remote.unsupported")
+		a.operationRejected("run_configuration", "remote_workspace")
+		a.notifyError(message)
+		return nil, refuseBuild(refusalNotSupported, message)
+	}
 	if configuration.IsProcess() {
 		if debug != nil {
 			return nil, refuseBuild(refusalNotSupported, "a built-in process run has no debugger")
@@ -308,6 +390,7 @@ func (a *App) startRunConfigurationWith(p *project, id string, debug *connection
 		}
 		a.runConfiguration(p, id)
 	})
+	setRunGroupFromInstance(p, op.session, &p.build.instances[index])
 	op.debug = debug
 	// The run starts a process on the files on disk, so unsaved documents are saved first,
 	// as a rerun does; a failed save keeps the run from starting. The save reports its own

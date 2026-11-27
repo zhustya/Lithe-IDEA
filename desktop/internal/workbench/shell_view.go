@@ -75,6 +75,22 @@ func (a *App) shellSplitter(c ui.C, which shellSplit) ui.Box {
 	return ui.Splitter(c, &a.layout.split[which]).Label(a.text.Panel.Resize)
 }
 
+// tooltipSide is where the full text of a value the tool window in slot s cuts short with an
+// ellipsis opens: toward the editor, on the inner side of the window's edge the slot lies
+// along, as the tooltips of the stripe buttons open. A path the Commit tool window cuts short
+// shows in full over the editor rather than over the rows below it, and the bottom area, along
+// the window's bottom edge, opens it above the text on every row instead of below it on the
+// upper rows and flipping above only on the rows near the edge.
+func (s slot) tooltipSide() ui.TooltipSide {
+	switch s {
+	case slotLeftTop, slotLeftBottom:
+		return ui.TooltipRight
+	case slotRightTop, slotRightBottom:
+		return ui.TooltipLeft
+	}
+	return ui.TooltipTop
+}
+
 // shellPanel declares the tool window open in slot s, the catalog item index: a header with
 // its name and a button that hides it, over a body. Most tool windows have no contents yet,
 // so their body says so, in the middle. The Git tool window has more in its header, the tabs
@@ -92,10 +108,11 @@ func (a *App) shellPanel(c ui.C, s slot, index int, hidden *slot) ui.Box {
 	if tool.id == itemFind && p != nil {
 		header = 39
 	}
-	return ui.Column(c.KeyInt(int(s))).Background(a.colors.Panel).Radius(workbenchPanelRadius).Clip().Children(func() {
+	return ui.Column(c.KeyInt(int(s))).Background(a.colors.Panel).Radius(workbenchPanelRadius).Clip().
+		EllipsisTooltipOn(s.tooltipSide()).Children(func() {
 		// The header is a target of its own so a right-click on it offers to hide the tool
 		// window, as the earlier client's tool window headers did.
-		hk := c.KeyInt(int(s)).Part("header")
+		hk := c.Part("header")
 		title := tool.label(a.text)
 		headerRow := ui.Row(hk).FillWidth().Height(header).Shrink(0).Items(ui.Center).Gap(shellHeaderGap).PadSides(0, 8, 0, 12).
 			HitWith(ui.ID(hk), i18n.Shared(a.language(), "desktop.panel.header"), gfx.HitOptions{Value: title, SkipFocus: true})
@@ -139,6 +156,9 @@ func (a *App) shellPanel(c ui.C, s slot, index int, hidden *slot) ui.Box {
 			if tool.id == itemNotifications {
 				a.notificationClearButton(hk)
 			}
+			if tool.id == itemPorts && p != nil {
+				a.remotePortsActions(c, p)
+			}
 			if tabbed && p != nil {
 				a.drawGitActions(c, p)
 			}
@@ -161,12 +181,30 @@ func (a *App) shellPanel(c ui.C, s slot, index int, hidden *slot) ui.Box {
 	})
 }
 
+// remoteToolWindow reports whether the tool window id works in a remote workspace: the project
+// listing, search and terminals run on the host, and so do Git's log and commit once the
+// workspace is trusted (in safe mode they say so, as in a local project), and so does Run, for the
+// built-in process runs; Ports exists only there.
+func remoteToolWindow(id string) bool {
+	switch id {
+	case itemProject, itemNotifications, itemTerminal, itemFind, itemGit, itemCommit, itemRun, itemPorts:
+		return true
+	}
+	return false
+}
+
 // toolBody declares the body of a tool window under its header: the component of the tool,
 // or the placeholder of a tool that has no contents yet.
 func (a *App) toolBody(c ui.C, tool item, p *project) {
 	body := ui.Column(c).FillWidth().Grow(1).Shrink(1).MinHeight(0)
 	if p == nil {
 		body.Children(func() { a.toolPlaceholder(c) })
+		return
+	}
+	if p.remote != nil && !remoteToolWindow(tool.id) {
+		// The tool window reads or runs the project on this computer, so it says it does not work
+		// in a remote workspace yet.
+		body.Children(func() { a.remoteLocalOnlyPanel(c) })
 		return
 	}
 	body.Clip().Children(func() {
@@ -203,6 +241,8 @@ func (a *App) toolBody(c ui.C, tool item, p *project) {
 			a.problemsPanel(c, p)
 		case itemBuild:
 			a.buildToolView(c, p)
+		case itemOutput:
+			a.pluginOutputView(c, p)
 		case itemRun:
 			a.runView(c, p)
 		case itemTests:
@@ -211,6 +251,8 @@ func (a *App) toolBody(c ui.C, tool item, p *project) {
 			a.debugView(c, p)
 		case itemNotifications:
 			a.notificationsToolBody(c.Part("notificationHistory"))
+		case itemPorts:
+			a.remotePortsView(c, p)
 		default:
 			switch {
 			case tool.tool != nil && tool.tool.View != "":
@@ -303,7 +345,7 @@ func (a *App) toolTabsWith(c ui.C, selected int, labels []string, choose func(in
 				chip = chip.Hover(ui.Look{}.Background(a.colors.Hover))
 			}
 			chip.Children(func() {
-				text := ui.Text(k, label).Ellipsis().Shrink(1)
+				text := ui.Text(c, label).Ellipsis().Shrink(1)
 				if on {
 					text.Color(a.colors.Text)
 				} else {
@@ -318,6 +360,13 @@ func (a *App) toolTabsWith(c ui.C, selected int, labels []string, choose func(in
 	})
 }
 
+// emptyEditorHint is a command an empty editor shows with its shortcuts.
+type emptyEditorHint struct {
+	label string
+	// command is the keymap command whose fixed gesture and bindings are shown.
+	command string
+}
+
 // editorArea declares the editor area. Once a terminal has been dragged into it, or a file
 // opened, it is the groups of tabs those are in (see editorGroups). Until then there is no
 // editor, so it shows what an empty one shows: the commands that open something and where to
@@ -328,14 +377,34 @@ func (a *App) editorArea(c ui.C) {
 	if a.editorGroups(c) {
 		return
 	}
-	hints := [...]struct {
-		label string
-		// command is the keymap command whose fixed gesture and bindings are shown.
-		command string
-	}{
+	if a.documentOnly {
+		ui.Column(c).Fill().Center().Background(a.colors.Editor).Children(func() {
+			ui.Text(c, i18n.Shared(a.language(), "desktop.singleFile.help")).Color(a.colors.Subtle)
+			if ui.Button(c, i18n.Shared(a.language(), "desktop.singleFile.openFile")).Outline().Clicked() {
+				c.After(a.chooseStandaloneFile)
+			}
+		})
+		return
+	}
+	hints := [...]emptyEditorHint{
 		{a.text.Editor.SearchEverywhere, "search.everywhere"},
 		{a.text.Editor.FindInFiles, "search.files"},
 	}
+	if p := a.project; p != nil && p.remote != nil {
+		// The notice that says what works in a remote workspace, or that it is in safe mode, stands
+		// over its empty editor.
+		ui.Column(c.Part("remote")).Fill().Children(func() {
+			a.safeModeNotice(c.Part("safeMode"), p)
+			a.emptyEditorHints(c, hints[:])
+		})
+		return
+	}
+	a.emptyEditorHints(c, hints[:])
+}
+
+// emptyEditorHints declares an empty editor: the commands that find something to open, with
+// their shortcuts.
+func (a *App) emptyEditorHints(c ui.C, hints []emptyEditorHint) {
 	editor := ui.Column(c).Fill().Clip().Center().Pad(shellContentPad).Background(a.colors.Editor).Radius(workbenchPanelRadius).Children(func() {
 		ui.Column(c).FillWidth().MaxWidth(shellHintWidth).Children(func() {
 			// Labels end and shortcuts start at one line down the middle, so the two read as

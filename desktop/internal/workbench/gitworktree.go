@@ -3,11 +3,13 @@ package workbench
 import (
 	"context"
 	"errors"
+	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
+	"github.com/1lck/Lithe-IDEA/desktop/internal/remoteplaceholder"
 	"github.com/vivaui/viva/app"
 	"github.com/vivaui/viva/ui"
 )
@@ -172,10 +174,13 @@ type worktreeState struct {
 	dialog  worktreeDialog
 	// target is the worktree a removal dialog asks about; refusal is what Git said when it
 	// refused to remove it without force.
-	target  core.GitWorktree
-	refusal string
-	busy    bool
-	create  worktreeCreation
+	target     core.GitWorktree
+	removeRoot string
+	refusal    string
+	busy       bool
+	// writeGen invalidates an old removal review after another worktree write.
+	writeGen uint64
+	create   worktreeCreation
 }
 
 // find returns the worktree registered at path.
@@ -690,6 +695,7 @@ func (a *App) runWorktreeWrite(p *project, operation string, removing bool,
 	write func(ctx context.Context, kernel Kernel, root string) error, refused func(a *App, err error) bool, done func(a *App)) {
 	w := &p.worktrees
 	w.busy = true
+	w.writeGen++
 	kernel, root := a.kernel, p.git.repositoryRoot(p.root)
 	a.background(p, branchOperationTimeout, func(ctx context.Context) func(*App) {
 		err := write(ctx, kernel, root)
@@ -743,28 +749,118 @@ func (a *App) toggleWorktreeLock(p *project, w core.GitWorktree) {
 func (a *App) beginRemoveWorktree(p *project, w core.GitWorktree) {
 	a.performed("git.worktree.remove", surfaceButton)
 	p.worktrees.dialog, p.worktrees.target, p.worktrees.refusal = worktreeDialogRemove, w, ""
+	p.worktrees.removeRoot = p.git.repositoryRoot(p.root)
+}
+
+var errWorktreeRemovalChanged = errors.New("reviewed worktree changed")
+
+// checkWorktreeRemoval compares the reviewed checkout with Core's current listing.
+// The workbench's list can remain stale while another tool window is active.
+func checkWorktreeRemoval(ctx context.Context, kernel Kernel, root string, reviewed core.GitWorktree) error {
+	list, err := kernel.GitWorktrees(ctx, root)
+	if err != nil {
+		return err
+	}
+	for _, current := range list {
+		if current.Path == reviewed.Path && current.Actions.Remove.Allowed &&
+			current.Head == reviewed.Head && current.Branch == reviewed.Branch {
+			return nil
+		}
+	}
+	return errWorktreeRemovalChanged
 }
 
 // removeWorktree removes the dialog's worktree; force removes it with its local changes. Git's
 // refusal of a checkout with changes opens the review that offers the forced removal.
 func (a *App) removeWorktree(p *project, force bool) {
-	target := p.worktrees.target
+	w := &p.worktrees
+	if w.busy {
+		return
+	}
+	target, root := w.target, w.removeRoot
+	w.dialog = worktreeDialogNone
 	operation := "git_worktree_remove"
 	if force {
 		operation = "git_worktree_remove_force"
 	}
+	if root != p.git.repositoryRoot(p.root) {
+		a.rejectWorktreeRemoval(operation)
+		return
+	}
 	a.runWorktreeWrite(p, operation, true, func(ctx context.Context, kernel Kernel, root string) error {
+		if force {
+			if err := checkWorktreeRemoval(ctx, kernel, root, target); err != nil {
+				return err
+			}
+		}
 		return kernel.GitRemoveWorktree(ctx, root, target.Path, force)
 	}, func(a *App, err error) bool {
+		if errors.Is(err, errWorktreeRemovalChanged) {
+			a.rejectWorktreeRemoval(operation)
+			a.loadWorktrees(p)
+			return true
+		}
 		var e *core.Error
 		if force || !errors.As(err, &e) || e.Code != core.CodeGitWorktreeHasChanges {
 			return false
 		}
-		p.worktrees.dialog, p.worktrees.refusal = worktreeDialogReview, e.Message
+		if a.canPresentGitResult(p) && a.chrome.isOpen(catalogIndex[itemGit]) && a.layout.gitTab == gitTabWorktrees {
+			w.dialog, w.refusal = worktreeDialogReview, e.Message
+		} else {
+			a.operationFailed(operation, err)
+			a.notifyWorktreeRemovalReview(p, root, target, e.Message)
+		}
 		return true
 	}, func(a *App) {
 		a.notifySuccess(a.text.Worktrees.Removed(worktreeName(target)))
 	})
+}
+
+// notifyWorktreeRemovalReview leaves the current work in place and restores only the reviewed checkout.
+func (a *App) notifyWorktreeRemovalReview(p *project, root string, target core.GitWorktree, reason string) {
+	lang, owner, generation := a.language(), p.ctx, p.worktrees.writeGen
+	a.notifyOperationAction(a.text.Worktrees.Failed(reason), target.Path,
+		i18n.Shared(lang, "desktop.worktree.openRemovalReview"), func(a *App) {
+			p := a.project
+			if p == nil || p.ctx != owner || !a.canPresentGitResult(p) || p.worktrees.busy {
+				return
+			}
+			a.performed("git.worktree.openRemovalReview", surfaceNotification)
+			a.reopenWorktreeRemovalReview(p, root, target, generation, reason)
+		})
+}
+
+// reopenWorktreeRemovalReview checks the original checkout before restoring the dialog.
+func (a *App) reopenWorktreeRemovalReview(p *project, root string, target core.GitWorktree, generation uint64, reason string) {
+	const operation = "git_worktree_remove_review"
+	w := &p.worktrees
+	if w.writeGen != generation || root != p.git.repositoryRoot(p.root) {
+		a.rejectWorktreeRemoval(operation)
+		return
+	}
+	w.busy = true
+	kernel := a.kernel
+	a.background(p, gitTimeout, func(ctx context.Context) func(*App) {
+		err := checkWorktreeRemoval(ctx, kernel, root, target)
+		return func(a *App) {
+			w.busy = false
+			switch {
+			case root != p.git.repositoryRoot(p.root) || errors.Is(err, errWorktreeRemovalChanged):
+				a.rejectWorktreeRemoval(operation)
+				a.loadWorktrees(p)
+			case err != nil:
+				a.operationFailed(operation, err)
+				a.notifyError(worktreeFailureText(&a.text.Worktrees, true, err))
+			case a.canPresentGitResult(p):
+				w.dialog, w.target, w.removeRoot, w.refusal = worktreeDialogReview, target, root, reason
+			}
+		}
+	})
+}
+
+func (a *App) rejectWorktreeRemoval(operation string) {
+	a.operationRejected(operation, "worktree_changed")
+	a.notifyError(i18n.Shared(a.language(), "desktop.worktree.removeSelectionChanged"))
 }
 
 // pruneWorktrees removes the registrations whose checkouts are gone.
@@ -782,8 +878,12 @@ func (a *App) repairWorktrees(p *project) {
 	}, nil, func(a *App) { a.notifySuccess(a.text.Worktrees.Repaired) })
 }
 
-// revealWorktree shows the checkout at path in the system's file browser.
+// revealWorktree shows the checkout at path in the system's file browser. A remote workspace's
+// checkouts are on the host, so it refuses there.
 func (a *App) revealWorktree(path string) {
+	if a.refuseRemote(a.project, "git_worktree_reveal") {
+		return
+	}
 	a.performed("git.worktree.reveal", surfaceButton)
 	a.background(nil, 0, func(context.Context) func(*App) {
 		err := app.RevealPath(path)
@@ -796,9 +896,13 @@ func (a *App) revealWorktree(path string) {
 	})
 }
 
-// copyWorktreePath puts the path of a checkout on the clipboard.
+// copyWorktreePath puts the path of a checkout on the clipboard: in a remote workspace, its path
+// on the host.
 func (a *App) copyWorktreePath(path string) {
 	a.performed("git.worktree.copyPath", surfaceButton)
+	if p := a.project; p != nil {
+		path = p.remoteHostPath(path)
+	}
 	if err := app.SetClipboardText(path); err != nil {
 		a.operationFailed("clipboard_copy", err)
 		a.notifyError(a.text.Worktrees.Failed(err.Error()))
@@ -814,15 +918,21 @@ func (a *App) showWorktrees() {
 	}
 }
 
-// openWorktree opens the checkout at path as the window's project.
+// openWorktree opens the checkout at path as the window's project. A remote workspace's checkout
+// is a host folder, which opens over a session of its own in a tab of this window
+// (openRemoteWorktree).
 func (a *App) openWorktree(path string) {
 	a.performed("git.worktree.open", surfaceButton)
+	if p := a.project; p != nil && p.remote != nil {
+		a.openRemoteWorktree(p, path)
+		return
+	}
 	// The worktree menu offers This Window and New Window itself.
 	a.openProjectThisWindow(path)
 }
 
 // beginCreateWorktree opens the dialog that creates a worktree and reads the references it
-// can start from.
+// can start from. In a remote workspace the dialog chooses a folder on the host.
 func (a *App) beginCreateWorktree(p *project) {
 	a.performed("git.worktree.create", surfaceButton)
 	w := &p.worktrees
@@ -862,16 +972,19 @@ func (a *App) syncWorktreeCreation(p *project) {
 
 // previewWorktreeCreation has Core derive the dialog's values from its inputs and applies
 // them; require makes an empty branch name an error, as a submit does. It reports whether Core
-// answered; without an answer the dialog cannot create the worktree.
+// answered; without an answer the dialog cannot create the worktree. Core derives them from the
+// paths alone, so a remote workspace sends its paths as host-named ones (worktreeHostNamed) and
+// shows the answer's as host paths.
 func (a *App) previewWorktreeCreation(p *project, require bool) bool {
 	w := &p.worktrees
 	cr := &w.create
 	ctx, cancel := context.WithTimeout(a.operationContext(context.Background()), kernelCallTimeout)
 	defer cancel()
+	destination := p.worktreeHostNamed(cr.destination.Text())
 	result, err := a.kernel.GitWorktreeCreationPreview(ctx, core.GitWorktreeCreationInput{
-		Root: p.git.repositoryRoot(p.root), Mode: cr.mode, Kind: cr.kind, Reference: cr.reference,
+		Root: p.worktreeHostNamed(p.remoteHostPath(p.git.repositoryRoot(p.root))), Mode: cr.mode, Kind: cr.kind, Reference: cr.reference,
 		Name: cr.name.Text(), RequireName: require, Revision: cr.revision.Text(),
-		Destination: cr.destination.Text(), LastSuggestion: cr.suggested,
+		Destination: destination, LastSuggestion: p.worktreeHostNamed(cr.suggested),
 		References: cr.refs.References, CheckedOutBranches: checkedOutBranches(w.list),
 	})
 	if err != nil {
@@ -890,10 +1003,11 @@ func (a *App) previewWorktreeCreation(p *project, require bool) bool {
 	if b := result.Branch; b != nil && b.TypingCleanedName != cr.name.Text() {
 		cr.name.SetText(b.TypingCleanedName)
 	}
-	if result.Destination != cr.destination.Text() {
-		cr.destination.SetText(result.Destination)
+	// A destination the user typed comes back as it was sent and stays as typed.
+	if result.Destination != destination {
+		cr.destination.SetText(p.worktreeShown(result.Destination))
 	}
-	cr.suggested = result.SuggestedDestination
+	cr.suggested = p.worktreeShown(result.SuggestedDestination)
 	cr.key = cr.inputs(w.gen)
 	return true
 }
@@ -905,12 +1019,20 @@ func (a *App) submitCreateWorktree(p *project) {
 	if p.worktrees.busy || !cr.result.Ready || !a.previewWorktreeCreation(p, true) || !cr.result.Ready {
 		return
 	}
+	typed := strings.TrimSpace(cr.destination.Text())
 	creation := core.GitWorktreeCreation{
 		Mode:        cr.mode,
-		Destination: filepath.Clean(strings.TrimSpace(cr.destination.Text())),
+		Destination: filepath.Clean(typed),
 		NoCheckout:  cr.noCheckout,
 	}
 	name := filepath.Base(creation.Destination)
+	// host is the new checkout's host folder in a remote workspace, which Core is sent as the
+	// path that names it.
+	var host string
+	if p.remote != nil {
+		host = path.Clean(typed)
+		creation.Destination, name = p.worktreeHostNamed(host), path.Base(host)
+	}
 	if b := cr.result.Branch; cr.mode == core.GitWorktreeNewBranch && b != nil {
 		creation.Name, name = b.CleanedName, b.CleanedName
 	}
@@ -929,6 +1051,17 @@ func (a *App) submitCreateWorktree(p *project) {
 		return kernel.GitCreateWorktree(ctx, root, creation)
 	}, nil, func(a *App) {
 		a.notifySuccess(a.text.Worktrees.Created(name))
+		if p.remote != nil {
+			// The list names a host checkout by the path Core maps it to: below the root for one
+			// in the workspace's folder, below the root's sibling otherwise.
+			if local, ok := remoteplaceholder.LocalPath(p.root, p.remote.binding.RemoteRoot(), host); ok {
+				p.worktrees.selected = local
+			}
+			if openAfter {
+				a.openRemoteHostFolder(p, host)
+			}
+			return
+		}
 		// Git lists the checkout by its canonical path, which differs from the typed one under
 		// a symbolic link.
 		selected := creation.Destination

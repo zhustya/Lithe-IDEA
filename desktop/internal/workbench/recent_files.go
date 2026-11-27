@@ -41,7 +41,7 @@ type recentFileState struct {
 
 func recentFilesName(root string) string { return "editor-recent-" + draftstore.Key(root) + ".json" }
 func (a *App) noteRecentFile(p *project, d *document, kind string) {
-	if d.virtual || d.scratch {
+	if p.standalone || d.virtual || d.scratch {
 		return
 	}
 	relative, inside := projectRelative(p.root, d.path)
@@ -157,7 +157,7 @@ func (a *App) recentFilesPopup(c ui.C) {
 	if v.edited {
 		title = i18n.Shared(a.language(), "desktop.recentFiles.edited")
 	}
-	ui.ModalWith(c.Part("recent-files"), &v.open, title, ui.ModalSpec{Width: 660}, func() {
+	ui.Modal(c.Part("recent-files"), &v.open, title, ui.ModalSpec{Width: 660}, func() {
 		submitted := ui.TextField(c.Part("query"), &v.query, i18n.Shared(a.language(), "desktop.recentFiles.query"), "").Icon(icons.Search).FillWidth().Submitted()
 		open := func(entry core.EditorRecentEntry) {
 			v.open = false
@@ -179,8 +179,8 @@ func (a *App) recentFilesPopup(c ui.C) {
 			}
 			if box.Children(func() {
 				ui.Column(row).FillWidth().Children(func() {
-					ui.Text(row, entry.Name).FontSize(13).Color(a.colors.Text)
-					ui.Text(row, entry.Path).FontSize(11).Color(a.colors.Subtle).Ellipsis()
+					ui.Text(c, entry.Name).FontSize(13).Color(a.colors.Text)
+					ui.Text(c, entry.Path).FontSize(11).Color(a.colors.Subtle).Ellipsis()
 				})
 			}).Clicked() {
 				c.After(func() { open(entry) })

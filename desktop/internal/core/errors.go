@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -28,6 +29,10 @@ const (
 	CodeProcessFailed ErrorCode = "process_failed"
 	// CodeGitBranchExists means a reviewed checkout would conflict with a local reference.
 	CodeGitBranchExists ErrorCode = "git_branch_exists"
+	// CodeGitBranchNotMerged means ordinary deletion needs an explicit forced confirmation.
+	CodeGitBranchNotMerged ErrorCode = "git_branch_not_merged"
+	// CodeGitBranchChanged means the branch moved after its deletion was reviewed.
+	CodeGitBranchChanged ErrorCode = "git_branch_changed"
 	// CodeGitCheckoutChanged means a reviewed checkout no longer matches the repository.
 	CodeGitCheckoutChanged ErrorCode = "git_checkout_changed"
 	// CodeGitAuthenticationFailed means a git.write operation failed because the remote
@@ -50,6 +55,10 @@ const (
 	// CodeGitCommitAuthorInvalid means a commit named an author that is not exactly
 	// "Name <email>"; nothing was committed.
 	CodeGitCommitAuthorInvalid ErrorCode = "git_commit_author_invalid"
+	// CodeGitUntrustedWorkspace means the request belongs to a workspace the user has not trusted
+	// (WithProjectCodeAllowed), so Core started no Git process: the repository's own configuration
+	// can name programs Git runs, such as core.fsmonitor and hooks.
+	CodeGitUntrustedWorkspace ErrorCode = "git_untrusted_workspace"
 	// CodeParseFailed means input or tool output could not be decoded into the stable
 	// contract. This package also uses it for a response it cannot decode.
 	CodeParseFailed ErrorCode = "parse_failed"
@@ -59,6 +68,42 @@ const (
 	CodeTimedOut ErrorCode = "timed_out"
 	// CodeConnectionClosed means a long-lived connection named by the request is closed.
 	CodeConnectionClosed ErrorCode = "connection_closed"
+	// CodeForwardTargetNotConfirmed means remote.startForward named a target outside the host's
+	// loopback interface the user did not confirm (S28); nothing was forwarded.
+	CodeForwardTargetNotConfirmed ErrorCode = "forward_target_not_confirmed"
+	// CodeForwardLimitReached means the session already runs as many forwards as Core allows;
+	// details carry the maximum.
+	CodeForwardLimitReached ErrorCode = "forward_limit_reached"
+	// CodeForwardHostPortInUse means the host port a host or reverse forward asked for is used by
+	// another program of the host; unlike a local port it is never replaced by another one.
+	CodeForwardHostPortInUse ErrorCode = "forward_host_port_in_use"
+	// CodeForwardHostPortDenied means the host refused to listen on the port, such as a port
+	// below 1024 for an unprivileged user.
+	CodeForwardHostPortDenied ErrorCode = "forward_host_port_denied"
+	// CodeForwardHostUnsupported means the remote server cannot listen on host ports.
+	CodeForwardHostUnsupported ErrorCode = "forward_host_unsupported"
+	// CodeReverseForwardDisabled means the remote preferences do not allow reverse forwards.
+	CodeReverseForwardDisabled ErrorCode = "reverse_forward_disabled"
+	// CodeRemoteServerInvalid means the remote server build for the host's platform could not be
+	// read, or its SHA-256 is not the one the application's manifest names; nothing was sent to
+	// the host.
+	CodeRemoteServerInvalid ErrorCode = "remote_server_invalid"
+	// CodeDevcontainerUntrustedFolder means remote.devcontainerUp named a folder the user has not
+	// trusted; the Dev Container CLI did not run, because building runs the folder's code here.
+	CodeDevcontainerUntrustedFolder ErrorCode = "devcontainer_untrusted_folder"
+	// CodeRemoteProcessGone means remote.attachProcess found no host process to receive: the
+	// connection resumed no session, the process ended before what this Core received, or an
+	// earlier attach already received it to its end.
+	CodeRemoteProcessGone ErrorCode = "remote_process_gone"
+	// CodeRemoteProcessAttached means another remote.attachProcess request already receives the
+	// host process.
+	CodeRemoteProcessAttached ErrorCode = "remote_process_attached"
+	// CodeEntryNotFound means a file change named an entry, or the directory that would hold it,
+	// that does not exist.
+	CodeEntryNotFound ErrorCode = "entry_not_found"
+	// CodeEntryExists means a file change would have replaced an existing entry; nothing was
+	// written.
+	CodeEntryExists ErrorCode = "entry_exists"
 	// CodeUnknown means the failure fits no more specific category.
 	CodeUnknown ErrorCode = "unknown"
 )
@@ -91,6 +136,13 @@ func (e *Error) Is(target error) bool {
 		return e.Code == CodeTimedOut
 	}
 	return false
+}
+
+// IsGitUntrustedWorkspace reports whether err is Core refusing to run Git for a workspace the
+// user has not trusted (CodeGitUntrustedWorkspace).
+func IsGitUntrustedWorkspace(err error) bool {
+	var coreErr *Error
+	return errors.As(err, &coreErr) && coreErr.Code == CodeGitUntrustedWorkspace
 }
 
 // newParseError reports a response that violates the envelope contract.

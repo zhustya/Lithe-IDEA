@@ -4,17 +4,17 @@ CI 构建缓存、架构并行、测试产物和 artifact 保留策略见
 [`2026-09-13-ci-build-cache-and-artifact-strategy.md`](../.agents/notes/implemented/process/2026-09-13-ci-build-cache-and-artifact-strategy.md)。
 本文只保留 CI 使用说明、下载方式和本地资源复用规则。
 
-仓库里的桌面端工作流只有三个，都位于 `.github/workflows/`：
+仓库里会单独触发的桌面端工作流只有三个，都位于 `.github/workflows/`；第四个文件 `desktop-remote-server.yml` 只能被它们调用（`workflow_call`），负责构建并冒烟测试远端服务：
 
 | 工作流 | 触发 | 内容 |
 | --- | --- | --- |
-| **Desktop CI**（`desktop-ci.yml`） | PR（Draft 只跑 Linux 作业，`ready_for_review` 时补跑完整矩阵）、推送到 `main`、手动运行 | `pins` 校验固定版本；`linux`（Format and script tests）运行 gofmt、ShellCheck、本地化校验、安装资源路径检查和脚本测试；`linux-test` 通过 `scripts/desktop/check.sh` 运行 Linux 的 vet 和测试；`macos`（`macos-26`）、`windows`（`windows-2022`）同样运行 vet 和测试，只在非 Draft 时执行 |
-| **Desktop Release**（`desktop-release.yml`） | 推送 `desktop-v*.*.*` 标签，或手动运行并填写版本 | 打包并校验 macOS、Windows、Linux 产物，核对校验和，然后创建或更新 GitHub prerelease，再签名发布正式版更新源。手动版本必须与 `desktop/viva.toml` 中的版本一致 |
-| **Desktop AutoBuild**（`desktop-autobuild.yml`） | 每天 UTC 10:00 定时，或手动运行 | 构建 macOS arm64 与 x64、Windows x64、Linux x64 和 arm64，发布到滚动预发布 `desktop-AutoBuild`。同一提交已经发布时，定时运行不会重复构建 |
+| **Desktop CI**（`desktop-ci.yml`） | PR（Draft 只跑 Linux 作业，`ready_for_review` 时补跑完整矩阵）、推送到 `main`、手动运行 | `pins` 校验固定版本；`linux`（Format and script tests）运行 gofmt、ShellCheck、本地化校验、安装资源路径检查和脚本测试；`linux-test` 通过 `scripts/desktop/check.sh` 运行 Linux 的 vet 和测试；`remote-server`（Remote server）调用可复用工作流 `desktop-remote-server.yml`，分两步：Build for linux amd64 and arm64 任务在一台 x86_64 runner 上编译两种架构的 Linux musl 远端服务，只检查静态链接、ELF 架构、清单与 SHA-256（不运行），上传产物 `remote-server-linux-musl` 并把体积写进任务摘要；随后 Test on linux amd64（`ubuntu-24.04`）和 Test on linux arm64（`ubuntu-24.04-arm`）两个任务并行下载同一份产物，重新校验并各自运行本架构的冒烟测试，两种架构都在原生硬件上运行，不用模拟器；`macos`（`macos-26`）、`windows`（`windows-2022`）同样运行 vet 和测试，只在非 Draft 时执行 |
+| **Desktop Release**（`desktop-release.yml`） | 推送 `desktop-v*.*.*` 标签，或手动运行并填写版本 | 先调用 `desktop-remote-server.yml` 编译并在两种架构上冒烟测试远端服务，再打包并校验 macOS、Windows、Linux 产物（每个包都嵌入这一份远端服务），核对校验和，然后创建或更新 GitHub prerelease，再签名发布正式版更新源。手动版本必须与 `desktop/viva.toml` 中的版本一致 |
+| **Desktop AutoBuild**（`desktop-autobuild.yml`） | 每天 UTC 10:00 定时，或手动运行 | 与 Release 一样先调用 `desktop-remote-server.yml`，再构建 macOS arm64 与 x64、Windows x64、Linux x64 和 arm64，发布到滚动预发布 `desktop-AutoBuild`。同一提交已经发布时，定时运行不会重复构建 |
 
 - Draft PR 只运行 Linux 检查：macOS 和 Windows 作业带有 `draft == false` 条件。标记为 ready 后，才运行完整的 Desktop CI。
-- `Desktop CI gate` 汇总固定版本、Linux 格式与脚本、Linux 测试、macOS 测试和 Windows 测试；普通 PR 必须全部成功，Draft 只允许跳过 macOS 和 Windows。更换已有 PR 的目标分支后，保留 Draft 状态；需要评审时标记为 ready 以针对新基线重新运行完整检查。单纯修改标题或正文不触发平台 runner。
-- Desktop CI 通过 `scripts/desktop/check.sh` 执行 Go 检查，Rust 内核由 `scripts/desktop/build-desktop-core.sh` 按 `PINNED_CORE_REVISION` 固定的 Lithe-core-rust 修订构建。
+- `Desktop CI gate` 汇总固定版本、Linux 格式与脚本、Linux 测试、远端服务（可复用工作流里的构建任务和 amd64、arm64 两个测试任务都成功，`remote-server` 才算成功）、macOS 测试和 Windows 测试；普通 PR 必须全部成功，Draft 只允许跳过 macOS 和 Windows。更换已有 PR 的目标分支后，保留 Draft 状态；需要评审时标记为 ready 以针对新基线重新运行完整检查。单纯修改标题或正文不触发平台 runner。
+- Desktop CI 通过 `scripts/desktop/check.sh` 执行 Go 检查：gofmt，带与不带 `dev` 标签各 vet 一次全部包；测试时 `settingswindow`、`pluginview`、`workbench` 三个界面包只在 `dev` 标签下跑一次，其余包不带标签跑，`buildinfo` 两种标签都跑。对这三个包，`dev` 标签只换掉两个文件：Viva 的属性检查只会多报错误；`buildinfo.Development` 只影响 Dock 角标（只在真实窗口里设置）和已安装的更新渠道（测试构建不带打包信息，两种标签下都为空）。所以不带标签再跑一遍检查不到更多问题，只会让 macOS 和 Windows 多花约 8 分钟。Windows 的 `workbench` 用例按顶层测试名分三组串行运行，三组合起来覆盖全部用例，每组仍遵守 Go 默认的 10 分钟上限。Rust 内核由 `scripts/desktop/build-desktop-core.sh` 按 `PINNED_CORE_REVISION` 固定的 Lithe-core-rust 修订构建。
 - Linux 测试作业也运行 `TestVisualLSPActions`，覆盖中英文与明暗主题的代码操作、签名帮助和内联提示失败重试。全量测试失败时仍采集截图。结果作为 `lsp-editor-visual-<系统>-<架构>` artifact 保留 14 天。
 - Desktop Release 的打包脚本是 `scripts/ci/desktop-release/package-release.sh`，AutoBuild 的打包和发布脚本位于 `scripts/ci/desktop-autobuild/`。
 - 两条发布入口共用 `scripts/desktop/package-desktop.sh`，通过 Viva 的 `--cgo` 选项保留 Rust Core 原生桥接；`desktop-go.sh` 提供目标编译器、静态库及头文件。Linux 发布包由 Ubuntu 22.04 构建，其系统库兼容性需要单独验证，不能按 Viva 的默认纯 Go 包假设没有 glibc 依赖。
@@ -68,6 +68,24 @@ macOS 的本地手动打包可用 `package-desktop.sh --ad-hoc-sign` 生成有�
 
 ### 独立工作树的本地编译
 
+编辑器显示偏好仍存放在 `<os.UserConfigDir()>/Lithe Desktop/settings.json`。同目录的 `.settings.lock` 由原生设置存储持有，只协调各客户端进程的读取与原子保存；关闭事务句柄或进程退出即释放 OS 锁，空文件留在用户配置目录避免锁身份变化。每个进程对该目录最多保留一个非递归原生观察器，最后一个工作台关闭时释放。它们属于用户运行时状态，不跨工作树复制，不写应用安装目录，不影响代码签名或增量更新基线。
+
+标题栏远程连接状态的链条和断链图标由 `scripts/desktop/generate-desktop-icons.sh` 从固定的 Lucide 0.469.0 下载 SVG，用 `desktop/go.mod` 固定的 Viva 编译器生成 `desktop/internal/icons/icons.go`；生成数据由 Git 管理。SVG 和编译器仅在本次生成器的临时目录中存活，退出即删除，不作为跨工作树缓存复制。运行期只读取编译进程序的图标，不下载、不生成文件，不改变安装包签名或增量更新基线。`TestVisualRemoteWorkspace` 的主机下拉和切换文件夹截图可写入本检出的 `.artifacts/visual/remote-host-switcher/`；截图绑定本次源码、Core/Viva 修订、平台、语言和主题，不跨检出复制、不进入发行包，由开发者或 CI 清理。
+
+远程身份核验当前在平台临时目录创建随机的 `lithe-evidence-<random>/ssh.log`，目录仅当前用户可访问；它由这次连接尝试持有并在释放时清理，不是编译缓存，不跨工作树复制，也不写入 app bundle 或 Windows 安装目录。读取最多 64 KiB，但 OpenSSH 的持续写入尚未有界，连接仍持有已删除文件的情况也是待修复的发行阻塞。远端的 `<installRoot>/target-identity-v1` 是账户服务状态，由远端账户持有、随该状态目录删除；不得复制到另一目标作为缓存，否则可能复制目标身份。这些路径不属于本地签名或更新基线；新增 Core 临时证据路径的安装包内运行验证尚未完成。
+
+文件关联的打包声明由 `scripts/desktop/generate-file-associations.sh` 读取编辑器内置高亮元数据并调用 Core 生成，作为 `desktop/viva.toml` 的一部分由 Git 管理；打包前以 `--check` 拒绝目录漂移。生成器始终使用构建主机架构执行，即使包的目标架构不同；最终应用和辅助程序仍使用所选目标架构。它是构建输入，不是可跨工作树复制的缓存。运行期只读取系统默认应用，明确应用后写入 LaunchServices 或当前用户的 Windows 注册表，不生成偏好副本，也不改写 bundle、安装目录或插件资源，因此不影响签名和增量更新基线。`TestVisualFileAssociations` 的真实系统读取截图通过 `LITHE_VISUAL_OUTPUT_DIR` 写到当前检出的 `.artifacts/visual/file-associations/`，绑定本次源码、Core/Viva 修订、平台、语言和主题，不跨工作树复制、不进入发行包，由开发者或 CI 清理。
+
+插件市场 SVG 由网络适配器有界读取，在后台编译为 Viva 图标；下载字节只活到本次编译结束，编译结果与失败仅保存在当前市场页的内存缓存中（最多64项、同时读取最多4个、每次最多256 KiB和10秒）。滚动离屏取消未完成的读取，刷新索引、离开市场标签或关闭设置窗口释放缓存；没有磁盘缓存，不跨工作树复制，不写安装目录，也不影响代码签名或增量更新基线。`TestVisualMarketplaceSVG` 的中英文、明暗主题及加载前后截图写入本工作树的 `.artifacts/marketplace-icons-visual/`，绑定当前源码、固定 Viva/Core 修订、语言、主题和渲染环境，不跨工作树复制，由开发者清理，不进入发行包。
+
+插件市场的增量基线存放在 `<os.UserCacheDir()>/Lithe/PluginArchives/<sha256>.zip`。缓存由桌面市场下载层持有，只保留已校验的原始 ZIP，单包最多 64 MiB，总预算 256 MiB 和 128 项，按最早写入淘汰。删除缓存后下一次更新会下载完整包。补丁和重建 ZIP 位于平台临时目录的独占目录，操作结束即清理。批准的后台更新暂存在平台插件数据根的 `.pending-updates/`，启动时复核当前版本和审批后发布进版本目录。下载缓存和暂存属于用户运行时状态，均不跨工作树复制。所有写入都在应用安装目录之外，安装包签名和桌面增量更新基线保持完整。
+
+同一缓存目录内的 `.archive-cache.lock` 串行化各进程的淘汰、临时写入和发布。退出临界区时关闭文件句柄，进程退出时由操作系统释放锁。空锁文件留在缓存目录供其他进程使用。锁不可用时跳过归档缓存写入并保留已下载的包。锁属于用户缓存，与缓存一起清理，不跨工作树复制，也不影响代码签名或桌面增量更新基线。
+
+插件数据根下的 `.package-changes.lock` 由插件服务持有。激活、发布、禁用和卸载结束后关闭文件句柄，操作系统也会在进程退出时释放锁。空锁文件留在插件数据根供其他进程使用。它属于用户运行时状态，位置在发行目录外，无需在工作树间复制，也不影响代码签名或桌面增量更新基线。
+
+CLI 用户启动器由 `desktop/internal/cli` 在明确注册时生成到 `<os.UserConfigDir()>/Lithe/cli/bin/lithe`（Windows 为 `lithe.cmd`）。它绑定用户机器与当前应用可执行路径，随用户移除注册删除；它不是编译缓存，不跨工作树复制，不写安装目录，也不影响代码签名和增量更新基线。CLI 与单文件模式的无头截图可写入当前检出的 `.artifacts/cli-single-file/`；它们绑定本次源码、语言、主题、Viva/Core 修订和渲染环境，不跨工作树复制，由开发者或 CI 清理，不进入发行包。
+
 TextMate 首行元数据随各插件归档发布，从已安装版本目录只读加载。宿主的匹配缓存只保留当前进程内的编译结果，没有可跨工作树复用的状态。加载过程不写入应用或插件包，不改变签名和增量更新基线。
 
 搜索偏好 `<platform-preferences>/search.json` 由桌面原生存储适配器持有，最多64 KiB；只在用户应用/恢复默认时条件原子写回，打开页面不创建文件。它是用户状态，没有源码、版本、平台、架构或工具链复用身份，不跨工作树复制。搜索索引和未保存快照仅在当前进程内，绑定工作区、可见性与读取预算，关闭项目后释放，不写入安装目录。它们不改变代码签名或增量更新基线。`TestVisualSearchResults` 和 `TestVisualSearchPreferences` 的截图写入当前检出的 `.artifacts/search-visual/`，绑定本次源码、语言、主题和渲染环境，不跨工作树复制；Linux Desktop CI上传后由runner清理，不进入发行包。
@@ -76,7 +94,11 @@ TextMate 首行元数据随各插件归档发布，从已安装版本目录只�
 
 Desktop CI 的 LSP 无头截图由 `TestVisualLSPActions` 写入当前工作树的 `.artifacts/lsp-editor-visual/`。截图是当前提交与当前渲染环境的验证产物，绑定源码、平台、Go 工具链和固定的 Viva 与 Core 版本，不跨工作树复用。CI 上传后由运行器清理工作树，截图不进入安装包。
 
+通用插件工作流的无头截图由 `TestVisualPluginWorkflow` 写入当前检出的 `.artifacts/plugin-workflow-visual/`，覆盖输出与预览、进度菜单、只读对比和快速选择面板的中英文、明暗主题。截图绑定本次提交、平台、Go 工具链和固定的 Viva 与 Core 版本，必须在当前检出重新生成，不跨工作树复制作为验证证据。Linux Desktop CI 通过系统包管理器安装 `fonts-noto-cjk` 到 runner 的系统字体目录，供真实字体回退使用；字体由 runner 持有并随其销毁，不属于检出缓存，不跨工作树复制，也不打包进应用。CI 将 PNG 上传为 `plugin-workflow-visual-<系统>-<架构>` artifact，保留 14 天；本地输出由开发者或 CI 清理，不进入安装包，也不影响代码签名或增量更新基线。
+
 Desktop CI 的 Build 命令发现截图由 `TestVisualBuildCommandDiscovery` 写入当前工作树的 `.artifacts/build-command-discovery-visual/`。该结果绑定提交、平台、Go 工具链和固定的 Viva 与 Core 版本，上传后由 CI 清理，不跨工作树复制，也不进入安装包。
+
+项目树失焦后的选择由 `TestVisualProjectTreeMissingFile` 验证。Linux Desktop CI 将明暗主题和中英文截图写入当前工作树的 `.artifacts/project-tree-visual/`，上传后保留 14 天。截图对应本次提交、主题、语言、渲染平台、Go 工具链和固定的 Viva 与 Core 版本，不跨工作树复制。运行器清理本地输出，截图不进入安装包。
 
 Viva 编辑器性能基线 `scripts/desktop/perf/editor-bench.sh` 把每次运行的原始输出和 Markdown 预算报告写入当前工作树的 `.artifacts/editor-perf/`（`run-<UTC 时间戳>.txt`、`record-<UTC 时间戳>.txt` 及同名 `.md`，以及开发者用 `--out` 指定在该目录下的文件）。它们只属于这一次运行，受源码修订、机器、CPU、运行时负载、Go 工具链和大文档大小（默认 10 MiB，可用 `LITHE_EDITOR_PERF_LARGE_BYTES` 或 `--large-bytes` 修改）影响；没有可验证的跨树身份 stamp，不跨工作树复制，由开发者在本地清理；该基线不是 CI 必跑项，CI 不运行基准，也没有 artifact。随仓库提交的历史记录 `desktop/benchmarks/history/*.jsonl` 由 Git 跟踪，属于源码而不是下载或生成资源，各工作树从 Git 检出。这些文件都不进入安装包，也不会改变代码签名或增量更新。
 
@@ -87,6 +109,9 @@ Viva 的 Core 源码检出、Cargo 目标目录和暂存静态库位于当前工
 `winapi-import-libraries=mingw-system`。这避免 cgo 依赖 Cargo 私有路径中的
 `libwinapi_*` 归档；不增加下载、缓存目录或运行期资源。能否把这些构建状态复制到另一个工作树，见下文 `.artifacts/desktop/` 一段。Core 仓库恢复的 `scripts/rust-core/verify-rust-core-comments.sh` 先用固定词法器检查真实注释，再检查 Rustdoc；调用方应沿用本工作树的 `CARGO_TARGET_DIR`。独立 Core 检出未提供该变量时，输出只进入该检出的 `.artifacts/rust-core-checks/`（桌面默认检出内为 `.artifacts/desktop/lithe-core-rust/source/.artifacts/rust-core-checks/`）。词法器二进制、Cargo 状态与 Rustdoc 受 Core 修订、helper Cargo.lock、目标、编译器及环境约束，随 Core 构建状态一起处理；只在构建/验证阶段生成，不进入安装包，不影响签名或增量更新。
 Viva 的 IDE API 辅助程序 `lithe-mcp` 由 `scripts/desktop/build-desktop-core.sh` 在同一固定 Core 检出上以 `features=mcp` 编到暂存目录的 `bin/`。`package-desktop.sh` 在 `viva package` 前把它复制成 `desktop/internal/idehelp/lithe-mcp.bin`，以 `lithe_bundled_helper` 构建标签嵌入客户端二进制，打包结束或失败时删除该生成文件；文件被 Git 忽略，不跨工作树复制。运行期客户端把嵌入的字节原子安装到应用数据目录的 `ide-host/bin/` 再启动，安装包本身不增加可执行文件、不被写入，也不改变签名或增量更新基线；开发运行由 `desktop-go.sh` 用暂存目录里的辅助程序通过 `LITHE_IDE_HELPER` 提供，不读取安装目录。
+远端工作区服务 `lithe-remote-server`（#2231）也嵌入客户端二进制：`package-desktop.sh` 在 `viva package` 前取得一个暂存目录（CI 通过 `LITHE_REMOTE_SERVER_STAGE` 给出可复用工作流已经冒烟测试过的产物，用 `--require-pinned` 校验；本地打包运行 `build-remote-server.sh` 重新编译，不要求固定提交），用 `verify-remote-server-artifacts.mjs` 校验后，再逐个核对体积和 SHA-256，复制成 `desktop/internal/remoteserver/<目标>.bin` 和 `remote-server-manifest.json`，以 `lithe_bundled_remote_server` 构建标签嵌入；校验后字节有变化就停止打包。这些生成文件被 Git 忽略，打包开始前先删掉上一次中断留下的旧文件，打包结束或失败时再删除，不跨工作树复制。运行期由 `remoteserver.Install` 在远程开发窗口连接主机时把与清单哈希一致的字节原子安装到用户缓存目录 `<os.UserCacheDir()>/Lithe/remote-server/<目标>/lithe-remote-server`（目录 0700、文件 0600，字节相同就复用），再交给 Core 上传到远程主机；它不执行这个文件，不写安装目录，安装包里也不多出文件，签名和增量更新基线不受影响（`remoteserver` 的 `TestResolveLeavesTheInstalledPackageUnchanged` 从仿造的已安装程序包运行这一流程，并比较包内文件清单）。删除该缓存目录是安全的，下次连接会重新安装。开发运行由 `desktop-go.sh` 在 `.artifacts/desktop/remote-server/` 有清单时导出 `LITHE_REMOTE_SERVER_STAGE`，客户端直接读取暂存目录并按清单校验，不复制；打包版只用嵌入的字节，忽略该变量。
+
+打开的远程工作区以本机占位目录作为项目根（`desktop/internal/remoteplaceholder`）。所有占位目录都在锚点文件 `<os.UserCacheDir()>/Lithe/remote-workspaces` 之下：它是一个空的只读普通文件（0444，所在目录 0700），第一次打开远程工作区时创建，之后每次使用都检查它仍是普通文件，是目录、链接或其他类型就拒绝打开。占位目录因此永远无法在本机列出或创建，没走 Core 的本机文件调用会以 ENOTDIR（Windows 上为 ERROR_PATH_NOT_FOUND）失败，不会读写一个看起来像项目的本机文件夹。锚点不含数据、不随工作区关闭删除；手动删除是安全的，下次打开会重新创建。它属于用户缓存目录，不在任何检出或安装目录里，不跨工作树复制，也不影响签名和增量更新基线（`remoteplaceholder` 的 `TestEnsureLeavesTheInstalledPackageUnchanged` 从仿造的已安装程序包创建锚点，并比较包内文件清单）。
 `viva package` 的链接参数是固定的，不能用 `-X` 注入构建信息，所以 `package-desktop.sh` 每次打包都生成 `desktop/internal/buildinfo/package_info.go`，以 `lithe_package_info` 构建标签编进客户端。文件记录更新渠道（`--stable` 为正式版，`--autobuild` 为 AutoBuild，本地包为空，不会自我更新）、构建时间（`LITHE_BUILD_TIME`，缺省为打包时刻）、提交（`LITHE_BUILD_COMMIT`，缺省为 `git HEAD`），以及验证更新源签名的公钥（`LITHE_UPDATE_PUBLIC_KEYS`，逗号分隔，只含公钥）。打包结束或失败时删除这个文件；它被 Git 忽略，不跨工作树复制。它只改变可执行文件本身，安装包里不会多出文件，签名和增量更新基线也不受影响。
 
 打包和更新源签名用的 `viva` 命令由 `scripts/desktop/build-viva-tool.sh` 按 `desktop/go.mod` 的 `replace` 从 Viva fork 编译，放在当前工作树的 `.artifacts/desktop/tools/viva-<模块版本>/`；`replace` 指向本地目录时没有版本，放在 `viva-local/` 并每次重新编译。目录名只固定 Viva 源码，不记录 Go 工具链和主机平台；随 `.artifacts/desktop/` 一起复制时，必须满足下文的前提（含相同的 Go 工具链和主机平台），否则删掉该目录，由脚本在本工作树重新编译。它只在打包（`package-desktop.sh`）和签名更新源（`publish-update-feed.sh`）时使用，不进入安装包，不影响签名或增量更新基线。
@@ -120,7 +145,8 @@ Viva 的市场包传输由操作系统提供的临时目录持有，目录形如
 增量更新基线。
 
 Viva 桌面端（`desktop/`，Go）的构建状态位于 `.artifacts/desktop/`，只由
-`scripts/desktop/build-desktop-core.sh` 和 `scripts/desktop/desktop-go.sh` 写入：
+`scripts/desktop/build-desktop-core.sh`、`scripts/desktop/desktop-go.sh`、上文的 `build-viva-tool.sh`
+和下文的 `build-remote-server.sh` 写入：
 `lithe-core-rust/` 是 Lithe-core-rust 的源码检出和 `CARGO_TARGET_DIR` 指向的 Cargo 编译目录（数 GB），
 `lithe-core/<debug|release>/` 是暂存给 cgo 的 `include/lithe_core.h`、`lib/liblithe_core.a`、
 `native-static-libs.txt` 和 `identity.txt`（单个 profile 约 700 MB），`bin/` 是本工作树构建的桌面端二进制。
@@ -144,6 +170,24 @@ target、profile 和 macOS deployment target，但它只描述本工作树最近
 结果异常时删掉复制的目录重新编译。做法见 `develop-lithe` Skill 的“检出与编译缓存复用”一节（`.artifacts/` 被 `.gitignore` 忽略，不提交）。
 这些目录只在构建时由上述脚本写入，应用运行时不写，也不进入 app bundle 或安装目录，
 不影响代码签名和增量更新基线。
+
+远端工作区的服务端 `lithe-remote-server` 由 `scripts/desktop/build-remote-server.sh` 编译（#2231）。它复用
+`build-desktop-core.sh --checkout-only` 准备的同一份 Core 检出（固定提交或 `LITHE_CORE_RUST_DIR`）和同一个 Cargo 编译目录，
+只开启 `lithe-remote` 的 `server` 特性，按 Core 的 release profile 和 `--locked` 编译 `x86_64-unknown-linux-musl` 与
+`aarch64-unknown-linux-musl`；两者都用 Rust 自带的 `rust-lld` 链接，不需要 Docker、zig 或交叉 C 工具链，但要先
+`rustup target add` 这两个目标。中间产物在 `lithe-core-rust/target/<目标>/release/`，与桌面 Core 一样按目标记录
+built-from 检出，换检出时只清理工作区成员。全部目标编译成功后，脚本删掉并重建 `.artifacts/desktop/remote-server/`，
+放入 `<目标>/lithe-remote-server` 和 `remote-server-manifest.json`（Core 提交、`coreWorktree`、`coreSource`、服务版本、rustc，
+以及每个文件的体积和 SHA-256）。`scripts/desktop/verify/verify-remote-server-artifacts.mjs` 读取这个目录：检查清单字段、
+文件哈希、ELF 架构和静态链接（没有解释器、没有动态库依赖），在同架构的 Linux 上再跑 `--identity`、`--version` 和一次
+`server.hello`；不同架构的文件不交给模拟器运行，只报告跳过。`--smoke <目标>` 只对该目标做冒烟测试，并要求它在本机跑通，
+可重复，其余目标只做文件检查、报告“not run here”；`all` 表示全部目标，`none` 表示一个都不运行；不传时对本机能运行的目标都做冒烟测试。`--require-pinned` 要求清单来自固定提交且工作区干净。体积只记录在报告和
+CI 任务摘要里，不设上限（#2231 的 D9）。随 `.artifacts/desktop/` 复制到另一个工作树时，除上一段的前提外，还要满足 Rust
+工具链和已安装目标相同、源工作树不在编译，并在使用前运行一次验证脚本确认清单哈希仍然一致；否则删掉 `remote-server/`，
+重新运行构建脚本。这个目录本身是构建状态：它不作为独立文件进入安装包，打包时按上文嵌入客户端二进制；开发运行只读取它，
+不写入。Desktop CI、Release 和 AutoBuild 都先调用 `desktop-remote-server.yml` 构建一次并在两种架构上测试，之后才开始编译应用：
+Release 与 AutoBuild 的每个打包任务下载这一份产物（artifact 不保留可执行位，下载后恢复 0755），通过 `LITHE_REMOTE_SERVER_STAGE` 交给 `package-desktop.sh`，
+所以同一次运行的所有安装包嵌入相同的、已在两种架构上冒烟测试过的字节。
 
 共享翻译源文件位于 `shared/i18n/`，桌面端生成文件是 Git 跟踪的 `desktop/internal/i18n/shared.generated.go`。每个工作树通过 Git 获取源文件和生成文件，然后运行 `node scripts/i18n/generate-i18n.mjs --check` 校验。修改源翻译后运行不带 `--check` 的同一命令，在当前工作树重新生成。资源身份由当前语言清单、词条和翻译共同决定，不需要下载，也没有独立的工具链或可复用 identity stamp。不要从其他工作树复制生成文件。生成文件随源码编译，不写入安装资源，也不改变签名和增量更新基线。维护步骤见 [共享翻译说明](../shared/i18n/README.md)。
 
@@ -193,6 +237,15 @@ cgo 参数），其余包命中缓存，模块不重新下载。
 新工作树第一次编译前，按 `develop-lithe` Skill 的“检出与编译缓存复用”一节判断能否从已有工作树复制
 `.artifacts/desktop/`（前提和实验结果见上文）；其他目录按本节各段的说明处理，写明不复制的就在本工作树重新生成。
 
+Dev Container 的显式集成验证可以把官方 `@devcontainers/cli` 安装到本检出的
+`.artifacts/desktop/devcontainer-cli/`，通过仅该测试子进程的 `PATH` 使用，不修改全局 npm 安装。
+2026-11-26 的验证固定为 0.91.0，需要 Node.js 20 或更新版本；此目录是开发者拥有的可删除下载缓存，
+不是宿主打包资源，也不是运行时自动安装机制。只有 CLI 版本、Node 支持范围、平台和架构均匹配，且目录完整时
+才可复制到另一个空闲工作树；不同平台或有原生 npm 依赖时重新安装，不共享可写目录。
+真实集成测试的临时工作区、容器、日志和截图属于本次测试，不复制：按唯一工作区标签清理测试容器，
+断开服务并删除临时工作区。用户确认创建的 `.devcontainer/devcontainer.json` 属于用户工作区，随工作区保存，
+不作为编译缓存搬运；创建、探测及 CLI 状态均不得写入 app bundle 或 Windows 安装目录。
+
 Inter 4.1 的 18 个静态 OTF（内部版本 4.001）及许可、JetBrains Mono 2.304 的 16 个静态 TTF、OFL 和作者信息，
 以及 Nerd Fonts v3.5.1 的 JetBrains Mono Nerd Font Mono 四个完整 TTF（常规、粗体、斜体、粗斜体）及 OFL 许可，
 位于 Git 跟踪的 `desktop/internal/bundledfont/fonts`；来源、版本和每个字型的固定 SHA-256 记录于 `NOTICE.txt`，
@@ -227,8 +280,7 @@ Go 构建在 windows/amd64 和 windows/arm64 上用 `go:embed` 把它们编译�
 
 - LSP workspace `-data`、运行时数据库、测试报告和其他会被进程修改的状态。
 
-可下载的官方插件包是声明式插件包（只含 `plugin.json` 和它声明的资源，不含宿主加载的代码，与架构无关），在 `.build/<triple>/<configuration>/OfficialPlugins` 中独立组装，`--triple` 只决定输出目录和签名工具的构建布局；组装后通过 `LitheOfficialPluginVerifier` 验证声明、打包的可执行文件和“Mach-O 原生代码只出现在清单声明的运行时目录内”；发布配置还要求 repository secret `LITHE_PLUGIN_PACKAGE_PRIVATE_KEY`，由 `LithePluginPackageSigner` 对完整包生成 `lithe-plugin-signature.json`，客户端按宿主内置官方插件策略和 publisher 公钥验证后才允许安装。该 secret 的值是与客户端内置公钥匹配的 base64 编码 32 字节 Ed25519 私钥，可用 `gh secret set LITHE_PLUGIN_PACKAGE_PRIVATE_KEY --repo 1lck/Lithe-IDEA < /secure/path/lithe-plugin-package-private-key.base64` 配置；私钥文件和 shell 历史都不得进入仓库或日志。没有该 key 时，普通 debug 全量构建会跳过 publisher 签名包，指定其中一个包 ID 的构建会失败，不会留下缺少签名文档的目录。本地调试插件时可以显式传入 `--development-unsigned`（仅 debug 配置可用），生成不含签名文档的开发包，只能由 debug 构建的 Lithe 从磁盘安装；这类开发包同样不跨工作树复用。无可靠 identity stamp，不跨工作树复制。插件安装后打包的语言服务器位于
-`<app-support>/Lithe/Plugins/<plugin-id>/versions/<version>/language-server`，由插件版本目录拥有，运行时只读，重装、回滚和卸载随插件一起处理，不是工作树构建缓存。以上项目都不跨工作树复制。
+已安装插件目录由 `desktop/internal/pluginpkg`（`pluginpkg.DefaultRoot()`）按平台管理：macOS 为 `~/Library/Application Support/Lithe Desktop/plugins`，Windows 为 `%LOCALAPPDATA%\Lithe Desktop\plugins`，Linux 为 `<os.UserConfigDir()>/lithe-desktop/plugins`。各个插件由自己的仓库负责构建、校验、签名与发布，桌面主仓库不内置插件打包器或签名密钥；宿主下载校验并经用户批准后，先在 `<plugin-root>/.staging/` 解压，再原子重命名到 `<plugin-root>/<plugin-id>/<version>/`，卸载时先移入 `<plugin-root>/.trash/` 再删除，可写状态统一落在 `<plugin-root>/.state/<plugin-id>/`。已安装版本目录在运行时只读，重装、回滚和卸载均由插件安装流程统一处理，且位于 app bundle 和 Windows 安装目录之外，不改变代码签名或桌面增量更新基线；它们属于用户运行时目录而非工作树构建缓存，任何情况下都不得跨 Git 工作树复制或共享。
 
 Build Provider 的模型与依赖快照位于插件根（`pluginpkg.DefaultRoot`）下的 `.state/<plugin-id>/<version>/build/<workspace-digest>/`。会话拥有其缓存、日志和临时输出；模型失效可重建，插件卸载随所属状态清理。工作区摘要只是归属键，不是构建身份。
 它属于具体插件、构建系统和工作区的可变上游状态，没有版本/平台/架构/工具链 identity stamp，
@@ -255,6 +307,16 @@ Provider 状态经平台 adapter 写 Application Support；插件安装目录和
 或 Windows 安装目录。归档压缩大小上限为 512 MiB，展开总量 4 GiB、条目数 50,000，完成记录上限 32 MiB；
 路径和链接不能逃出解压根。相关边界见
 [受管插件运行时](../.agents/notes/implemented/architecture/2026-11-18-managed-plugin-runtimes.md)。
+
+插件用 `commandInstallers` 声明的下载安装器（`requires.commandInstallers: 1`，权限 `commands.install`）
+在用户点击安装并确认后，才下载插件固定地址和 SHA-256 的压缩包。结果位于
+`<plugin-root>/.state/<plugin-id>/commands/<installer-id>/<cache-key>/`，布局与上面的受管运行时相同
+（`archive`、`install-<random>/`、`ready.json`、`.lock`），大小和路径上限也相同；
+命令所在目录记录在 `<plugin-root>/.state/<plugin-id>/commands.json`。缓存键由 Core 按压缩包内容身份
+（地址、版本、平台、校验值、格式和目录）生成，镜像不参与。记录新缓存键后，宿主删除同一安装器下的其他缓存键目录；
+删不掉的留到下次安装。卸载插件时随插件状态一起删除。它是用户运行时状态，不是工作树构建输入，
+不跨工作树复制或共享，也不写插件包、app bundle 或 Windows 安装目录。决策见
+[插件声明的命令缺失时由宿主安装](../.agents/notes/implemented/architecture/2026-11-15-plugin-command-installers.md)。
 
 插件网页的宿主持久状态（Viva 的 `pluginservice.SetPageState`）写到每用户插件根目录
 （`pluginpkg.DefaultRoot`）下的

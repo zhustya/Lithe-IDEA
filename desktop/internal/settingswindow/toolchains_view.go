@@ -110,7 +110,7 @@ func (w *window) toolchainsPage(c ui.C) {
 	ui.Column(c).FillWidth().Grow(1).Shrink(1).MinHeight(0).Background(b.surface).Children(func() {
 		w.toolchainsToolbar(c.Part("bar"), language, scope)
 		w.toolchainsChips(c.Part("chips"), language)
-		w.toolchainsNotices(c.Part("notices"), language, scope)
+		w.toolchainsNotices(c, language, scope)
 		switch {
 		case t.scope == scopeProject && t.noProject():
 			w.toolchainsEmpty(c, i18n.Shared(language, "desktop.toolchains.noProject"))
@@ -249,24 +249,30 @@ func (w *window) toolchainsNotices(c ui.C, language i18n.Language, scope *toolch
 	case t.inspecting:
 		busy = i18n.Shared(language, "desktop.toolchains.loading")
 	}
-	if !banner && scope.failed == nil && t.failed == nil && t.view.failed == nil && busy == "" {
+	if !banner && !scope.snapshot.DiscoveryIncomplete && scope.failed == nil && t.failed == nil && t.view.failed == nil && busy == "" {
 		return
 	}
-	ui.Column(c).FillWidth().Shrink(0).PadSides(8, 14, 0, 14).Gap(8).Children(func() {
+	ui.Column(c.Part("notices")).FillWidth().Shrink(0).PadSides(8, 14, 0, 14).Gap(8).Children(func() {
 		if banner {
 			if len(sources) > 3 {
 				sources = sources[:3]
 			}
-			text := i18n.SharedFormat(language, "desktop.buildSettings.trustBanner", map[string]string{
-				"count":   formatCount(count),
-				"sources": strings.Join(sources, i18n.Shared(language, "desktop.buildSettings.listSeparator")),
-			})
+			text := trustBannerText(language, count, strings.Join(sources, i18n.Shared(language, "desktop.buildSettings.listSeparator")))
 			w.box(c.Part("banner"), boxWarn, func(words gfx.Color) {
 				boxIcon(c, icons.CircleAlert, words)
 				boxText(c, text, words)
 				w.infoButton(c.Part("banner-help"), i18n.Shared(language, "desktop.toolchains.trustProjectHelp"))
 				if t.trustEffect != nil && w.button(c.Part("banner-trust"), buttonSmall, i18n.Shared(language, "desktop.buildSettings.trustProject"), t.busy()) {
 					t.beginTrust(true)
+				}
+			})
+		}
+		if scope.loaded && scope.snapshot.DiscoveryIncomplete {
+			w.box(c.Part("discovery-incomplete"), boxWarn, func(words gfx.Color) {
+				boxIcon(c, icons.CircleAlert, words)
+				boxText(c, i18n.Shared(language, "desktop.toolchains.discoveryIncomplete"), words)
+				if w.button(c.Part("discovery-reload"), buttonSmall, i18n.Shared(language, "desktop.toolchains.reload"), t.busy()) {
+					t.reload()
 				}
 			})
 		}
@@ -322,10 +328,7 @@ func (w *window) toolchainsSplit(c ui.C, language i18n.Language, scope *toolchai
 				}
 			}
 			ui.Row(c).FillWidth().Shrink(0).PadX(12).PadY(5).Gap(8).Children(func() {
-				ui.Text(c, i18n.SharedFormat(language, "desktop.buildSettings.listCount", map[string]string{
-					"matched": formatCount(tools),
-					"total":   formatCount(w.toolchains.view.view.Counts.Total),
-				})).FontSize(11).Color(b.faint).Ellipsis()
+				ui.Text(c, toolchainListCount(language, tools, w.toolchains.view.view.Counts.Total)).FontSize(11).Color(b.faint).Ellipsis()
 			})
 		})
 		ui.Row(c).Width(1).Shrink(0).FillHeight().Background(b.line)
@@ -531,7 +534,11 @@ func (w *window) toolchainToolContent(c ui.C, language i18n.Language, scope *too
 		ui.Row(c).FillWidth().MinWidth(0).Items(ui.Center).Children(func() {
 			plugin := toolchainPluginName(scope, tool.PluginID, tool.PluginName)
 			if current.ok {
-				ui.Text(c, plugin+" · "+midTrim(current.home, 44)).FontSize(11).Color(b.faint).Shrink(1).Ellipsis()
+				short := midTrim(current.home, 44)
+				box := ui.Text(c, plugin+" · "+short).FontSize(11).Color(b.faint).Shrink(1).Ellipsis()
+				if short != current.home {
+					box.OverflowTooltip(plugin + " · " + current.home)
+				}
 				return
 			}
 			detail := w.toolchainReasonDetail(language, scope, entry, tool)
@@ -680,7 +687,7 @@ func (w *window) toolchainDetail(c ui.C, language i18n.Language, scope *toolchai
 	ui.Column(c).FillWidth().MinWidth(0).Children(func() {
 		w.toolchainHead(c.Part("head"), language, scope, tool, name, plugin)
 		ui.Row(c).Height(14).Shrink(0)
-		if w.toolchainProblem(c.Part("problem"), language, scope, entry, current, status, name, plugin) {
+		if w.toolchainProblem(c, language, scope, entry, current, status, name, plugin) {
 			ui.Row(c).Height(12).Shrink(0)
 		}
 		w.toolchainEffective(c.Part("effective"), language, scope, entry, current, status)
@@ -776,7 +783,7 @@ func (w *window) toolchainProblem(c ui.C, language i18n.Language, scope *toolcha
 		text = toolchainReasonLabel(language, current.reason)
 	}
 	prepareRuntime := entry.tool.ManagedRuntime && t.runtimeEffect != nil && !trust
-	w.box(c, kind, func(words gfx.Color) {
+	w.box(c.Part("problem"), kind, func(words gfx.Color) {
 		boxIcon(c, icon, words)
 		boxText(c, text, words)
 		if trust && w.button(c.Part("trust"), buttonSmall, i18n.Shared(language, "desktop.buildSettings.trustProject"), t.busy()) {
@@ -871,7 +878,11 @@ func (w *window) toolchainEffective(c ui.C, language i18n.Language, scope *toolc
 						}
 						ui.Text(c, next.version).FontSize(buildSmall).Mono().Weight(gfx.WeightBold).Color(words).Shrink(0)
 						ui.Text(c, " · ").FontSize(buildSmall).Color(words).Shrink(0)
-						ui.Text(c, midTrim(next.home, 60)).FontSize(buildSmall).Mono().Color(words).Shrink(1).Ellipsis()
+						short := midTrim(next.home, 60)
+						path := ui.Text(c, short).FontSize(buildSmall).Mono().Color(words).Shrink(1).Ellipsis()
+						if short != next.home {
+							path.OverflowTooltip(next.home)
+						}
 						ui.Text(c, i18n.SharedFormat(language, "desktop.buildSettings.parenthesized", map[string]string{"text": ToolchainLayerLabel(language, next.layer)})).
 							FontSize(buildSmall).Color(words).Shrink(0)
 					})
@@ -980,12 +991,12 @@ func (w *window) toolchainTrace(c ui.C, language i18n.Language, tool *toolchain.
 			ui.Row(k).FillWidth().MinWidth(0).PadY(3).Gap(8).Items(ui.Start).Children(func() {
 				ui.Row(k).Width(14).Shrink(0).MinHeight(16).Center().Children(func() {
 					if mark == "" {
-						ui.Icon(k, icons.Check).Size(11, 11).Color(markColor)
+						ui.Icon(c, icons.Check).Size(11, 11).Color(markColor)
 						return
 					}
-					ui.Text(k, mark).FontSize(buildSmall).Weight(gfx.WeightBold).Color(markColor)
+					ui.Text(c, mark).FontSize(buildSmall).Weight(gfx.WeightBold).Color(markColor)
 				})
-				ui.Wrap(k, text).FontSize(buildSmall).Color(words).Grow(1).Shrink(1).MinWidth(0)
+				ui.Wrap(c, text).FontSize(buildSmall).Color(words).Grow(1).Shrink(1).MinWidth(0)
 			})
 		}
 	})
@@ -1131,7 +1142,11 @@ func (w *window) toolchainOption(c ui.C, language i18n.Language, scope *toolchai
 			version = "—"
 		}
 		ui.Text(c, version).FontSize(buildMono).Mono().Color(b.text).Width(92).Shrink(0).Ellipsis()
-		ui.Text(c, midTrim(option.home, 58)).FontSize(buildMono).Mono().Color(b.sub).Grow(1).Shrink(1).MinWidth(0).Ellipsis()
+		short := midTrim(option.home, 58)
+		path := ui.Text(c, short).FontSize(buildMono).Mono().Color(b.sub).Grow(1).Shrink(1).MinWidth(0).Ellipsis()
+		if short != option.home {
+			path.OverflowTooltip(option.home)
+		}
 		ui.Row(c).Shrink(0).Gap(4).Items(ui.Center).Children(func() {
 			if option.why != "" {
 				kind := tagErr
@@ -1173,7 +1188,8 @@ func (w *window) toolchainAddRow(c ui.C, language i18n.Language, scope *toolchai
 		})
 		w.infoButton(c.Part("help"), i18n.Shared(language, "desktop.buildSettings.addHelp"))
 		if w.button(c.Part("browse"), buttonSmall, i18n.Shared(language, "desktop.pluginSettings.browse"), t.busy()) {
-			w.pickToolchainDirectory(tool.ID, input, directory)
+			// The native picker runs a modal message loop on Windows, so it must run after paint.
+			c.After(func() { w.pickToolchainDirectory(tool.ID, input, directory) })
 		}
 		home := strings.TrimSpace(*input)
 		check := w.button(c.Part("check"), buttonSmall, i18n.Shared(language, "desktop.buildSettings.checkAndUse"), home == "" || t.busy())

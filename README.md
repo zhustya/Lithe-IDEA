@@ -121,6 +121,14 @@ Starting from `0.8.1`, releases ship the unified Viva + Rust Core client as `Lit
 
 - **macOS manual download:** Grab the `.dmg` from [GitHub Releases](https://github.com/1lck/Lithe-IDEA/releases/latest) (`arm64` for Apple Silicon, `amd64` for Intel).
 - **Windows x64:** Download the Windows `.exe` installer from [GitHub Releases](https://github.com/1lck/Lithe-IDEA/releases/latest).
+- **Linux x64 / arm64:** Install for your user with one command (no `sudo`). It downloads the release from the update feed, checks its SHA-256, puts `lithe` in `~/.local/bin` and adds Lithe to the application menu; Lithe then updates itself with incremental patches:
+
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/1lck/Lithe-IDEA/main/scripts/install/linux.sh | sh
+  curl -fsSL https://raw.githubusercontent.com/1lck/Lithe-IDEA/main/scripts/install/linux.sh | sh -s -- uninstall
+  ```
+
+  The `.deb` and `.rpm` packages on [GitHub Releases](https://github.com/1lck/Lithe-IDEA/releases) are owned by the package manager and do not update themselves. To install by hand instead, unpack the Linux `.tar.gz` and run `./install.sh`.
 - **Build from source / Pre-releases:** Check the [Releases](https://github.com/1lck/Lithe-IDEA/releases) notes, or follow [Develop Lithe](#develop-lithe) below.
 
 <details>
@@ -331,12 +339,12 @@ node scripts/i18n/generate-i18n.mjs --check
   </tr>
   <tr>
     <td width="112" align="center">
-      <a href="https://torchai.ai/sign-up?aff=FdkE">
-        <img src="./docs/assets/sponsors/torchai.jpg" width="64" alt="TorchAI">
+      <a href="https://www.deepsiderapi.com/?utm_source=lithe">
+        <img src="./docs/assets/sponsors/deepsider-api.jpg" width="112" alt="DeepSider API">
       </a>
     </td>
     <td>
-      <a href="https://torchai.ai/sign-up?aff=FdkE"><strong>TorchAI</strong></a> provides convenient large language model relay access for coding, content, and automation. Thank you to TorchAI for supporting Lithe!
+      <a href="https://www.deepsiderapi.com/?utm_source=lithe"><strong>DeepSider API</strong></a> is a unified LLM API gateway for GPT, Claude, Gemini, DeepSeek, and more. Official provider channels, no shared account pools or reverse-engineered APIs. Rates start at 29% of official pricing, with real-time usage tracking and transparent billing.
     </td>
   </tr>
   <tr>

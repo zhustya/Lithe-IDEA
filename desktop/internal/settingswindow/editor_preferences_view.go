@@ -3,11 +3,12 @@ package settingswindow
 import (
 	"context"
 	"errors"
+	"strconv"
+	"time"
+
 	"github.com/1lck/Lithe-IDEA/desktop/internal/core"
 	"github.com/1lck/Lithe-IDEA/desktop/internal/i18n"
 	"github.com/vivaui/viva/ui"
-	"strconv"
-	"time"
 )
 
 func (w *window) editorPresentationCard(c ui.C) {
@@ -25,6 +26,7 @@ func (w *window) editorPresentationCard(c ui.C) {
 			values.EditorPreferences = resolved
 		}
 		w.editorDelay.SetText(strconv.FormatUint(values.EditorPreferences.AutoSaveDelayMilliseconds, 10))
+		w.loadRainbowPalettes(values.EditorPreferences)
 		w.editorDelayReady = true
 	}
 	current := values.EditorPreferences
@@ -35,11 +37,21 @@ func (w *window) editorPresentationCard(c ui.C) {
 		if ui.Switch(c.Part("whitespace"), &current.Whitespace, i18n.Shared(lang, "desktop.editorPrefs.whitespace")).Changed() {
 			w.setEditorPresentation(current)
 		}
+		if ui.Switch(c.Part("indent-guides"), &current.IndentGuides, i18n.Shared(lang, "desktop.editorPrefs.indentGuides")).Changed() {
+			w.setEditorPresentation(current)
+		}
 		ui.Row(c).FillWidth().Items(ui.Center).Gap(6).Children(func() {
 			if ui.Switch(c.Part("inlay-hints"), &current.InlayHints, i18n.Shared(lang, "desktop.editorPrefs.inlayHints")).Changed() {
 				w.setEditorPresentation(current)
 			}
 			w.infoButton(c.Part("inlay-hints-info"), i18n.Shared(lang, "desktop.editorPrefs.inlayHintsHelp"))
+		})
+		ui.Row(c).FillWidth().Items(ui.Center).Gap(6).Children(func() {
+			autoCompletion := !values.DisableAutoCompletion
+			if ui.Switch(c.Part("auto-completion"), &autoCompletion, i18n.Shared(lang, "desktop.editorPrefs.autoCompletion")).Changed() {
+				w.setDisableAutoCompletion(!autoCompletion)
+			}
+			w.infoButton(c.Part("auto-completion-info"), i18n.Shared(lang, "desktop.editorPrefs.autoCompletionHelp"))
 		})
 		w.settingsRow(c, i18n.Shared(lang, "desktop.editorPrefs.cursorStyle"), "", func() {
 			if ui.Select(c.Part("caret-style"), &current.CursorStyle, []string{"line", "block", "underline"}, func(style string) string {
@@ -77,24 +89,54 @@ func (w *window) editorPresentationCard(c ui.C) {
 	})
 }
 
-func (w *window) setEditorPresentation(value core.EditorPreferences) {
-	stored := core.EditorStoredPreferences{
-		LineNumbers:               &value.LineNumbers,
-		Whitespace:                &value.Whitespace,
-		InlayHints:                &value.InlayHints,
-		CursorStyle:               value.CursorStyle,
-		CursorBlink:               &value.CursorBlink,
-		AutoSaveDelayMilliseconds: &value.AutoSaveDelayMilliseconds,
+func (w *window) setDisableAutoCompletion(value bool) {
+	if w.sess.finished.Load() || w.sess.values.DisableAutoCompletion == value {
+		return
 	}
+	w.sess.values.DisableAutoCompletion = value
+	if set := w.ctrl.opts.SetDisableAutoCompletion; set != nil {
+		set(value)
+	}
+}
+
+func (w *window) setEditorPresentation(value core.EditorPreferences) {
+	stored := w.sess.values.EditorStoredPreferences
+	stored.LineNumbers = &value.LineNumbers
+	stored.Whitespace = &value.Whitespace
+	stored.InlayHints = &value.InlayHints
+	stored.CursorStyle = value.CursorStyle
+	stored.CursorBlink = &value.CursorBlink
+	stored.AutoSaveDelayMilliseconds = &value.AutoSaveDelayMilliseconds
+	if value.RainbowBrackets != w.sess.values.EditorPreferences.RainbowBrackets {
+		stored.RainbowBrackets = &value.RainbowBrackets
+	}
+	if value.RainbowVariables != w.sess.values.EditorPreferences.RainbowVariables {
+		stored.RainbowVariables = &value.RainbowVariables
+	}
+	if value.IndentGuides != w.sess.values.EditorPreferences.IndentGuides {
+		stored.IndentGuides = &value.IndentGuides
+	}
+	if value.RainbowIndentGuides != w.sess.values.EditorPreferences.RainbowIndentGuides {
+		stored.RainbowIndentGuides = &value.RainbowIndentGuides
+	}
+	if resolved, ok := w.resolveEditorPresentation(stored); ok {
+		stored.AutoSaveDelayMilliseconds = &resolved.AutoSaveDelayMilliseconds
+		w.publishEditorPresentation(stored, resolved)
+	}
+}
+
+func (w *window) resolveEditorPresentation(stored core.EditorStoredPreferences) (core.EditorPreferences, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resolved, err := core.NewClient().ResolveEditorPreferences(ctx, stored)
 	if err != nil {
 		w.editorPrefsError = i18n.Shared(w.marketLanguage(), "desktop.editorPrefs.failed")
 		w.reportEssentialsFailure("editor_preferences", err)
-		return
 	}
-	stored.AutoSaveDelayMilliseconds = &resolved.AutoSaveDelayMilliseconds
+	return resolved, err == nil
+}
+
+func (w *window) publishEditorPresentation(stored core.EditorStoredPreferences, resolved core.EditorPreferences) {
 	w.sess.values.EditorStoredPreferences, w.sess.values.EditorPreferences = stored, resolved
 	w.editorDelay.SetText(strconv.FormatUint(resolved.AutoSaveDelayMilliseconds, 10))
 	w.editorPrefsError = ""
@@ -104,13 +146,9 @@ func (w *window) setEditorPresentation(value core.EditorPreferences) {
 }
 
 func (w *window) resetEditorPresentation() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	value, err := core.NewClient().ResolveEditorPreferences(ctx, core.EditorStoredPreferences{})
-	if err != nil {
-		w.reportEssentialsFailure("editor_preferences", err)
-		w.editorPrefsError = i18n.Shared(w.marketLanguage(), "desktop.editorPrefs.failed")
-		return
+	stored := core.EditorStoredPreferences{}
+	if value, ok := w.resolveEditorPresentation(stored); ok {
+		w.publishEditorPresentation(stored, value)
+		w.loadRainbowPalettes(value)
 	}
-	w.setEditorPresentation(value)
 }

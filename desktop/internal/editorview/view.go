@@ -49,8 +49,8 @@ type Config struct {
 	// Save asks the window to write the text out, for the save chord.
 	Save func()
 	// OnEdit reports every replacement made to the view, for a language
-	// server's versioned document synchronization. It runs on the view's thread
-	// and must not block.
+	// server's versioned document synchronization, except the text ShowContent
+	// puts in, which no one edited. It runs on the view's thread and must not block.
 	OnEdit func(Edit)
 	// MinimapID is the minimap's hit and MinimapToggleID the button beside it that hides and
 	// shows it; VerticalBarID and HorizontalBarID are the tracks of the scrollbars. The window
@@ -224,12 +224,22 @@ type View struct {
 	mm      minimapState
 	// hlGen counts the highlighter's reports of lines colored anew, from its goroutine, so
 	// the minimap knows its colors are stale.
-	hlGen           atomic.Uint64
-	words           Messages
-	presentation    Presentation
-	whitespaceColor gfx.Color
-	searchRanges    []Range
-	searchRevision  int
+	hlGen               atomic.Uint64
+	words               Messages
+	presentation        Presentation
+	whitespaceColor     gfx.Color
+	searchRanges        []Range
+	searchRevision      int
+	indentGuideColors   []gfx.Color
+	indentGuideScopes   []indentScopeGuide
+	indentGuideRevision int
+	indentGuideActive   fallbackIndentGuide
+	symbolRanges        []Range
+	symbolRevision      int
+	symbolSelection     Range
+	bracketMatches      []BracketMatch
+	bracketRevision     int
+	clickedBracket      bracketClick
 
 	// font is the font the view draws with, normalized; see SetFont. The cell size and line height
 	// below are measured from it at each paint.
@@ -313,6 +323,7 @@ func New(cfg Config) *View {
 	}
 	notify := cfg.Notify
 	v.hl = syntax.NewHighlighter(cfg.Syntax, text, syntax.HighlighterOptions{
+		CollectCandidates: true,
 		OnChange: func(first, last int) {
 			v.hlGen.Add(1)
 			if notify != nil {
@@ -496,23 +507,36 @@ func (v *View) diskEdit(content Content) (Edit, bool) {
 }
 
 func (v *View) replaceFromDisk(content Content) bool {
+	return v.replaceContent(content, true)
+}
+
+// replaceContent makes content the view's text and its saved baseline. Content read from disk
+// changes the file the view edits: undo keeps the text it replaces and OnEdit hears the change.
+// Other content is text the host shows (ShowContent): the view drops its undo and redo history,
+// and OnEdit hears nothing, so a host that mirrors the view's edits does not get the text back.
+func (v *View) replaceContent(content Content, fromDisk bool) bool {
 	v.extra = nil
 	var change Edit
 	changed := false
-	if v.cfg.OnEdit != nil {
+	if fromDisk && v.cfg.OnEdit != nil {
 		change, changed = v.diskEdit(content)
 	}
-	v.undo = append(v.undo, v.snapshot())
-	if len(v.undo) > undoLimit {
-		v.undo = v.undo[len(v.undo)-undoLimit:]
+	if fromDisk {
+		v.undo = append(v.undo, v.snapshot())
+		if len(v.undo) > undoLimit {
+			v.undo = v.undo[len(v.undo)-undoLimit:]
+		}
+		v.redo = v.redo[:0]
+	} else {
+		v.undo, v.redo = nil, nil
 	}
-	v.redo = v.redo[:0]
 	v.ClearInlayHints()
 	v.text = content.text
 	v.saved = v.text
 	v.revision++
 	v.clearCursorHistory()
 	v.hl.SetText(v.text)
+	v.clearColors()
 	v.forgetRows()
 	boundary := func(at int) int {
 		at = min(max(at, 0), v.text.Len())
@@ -563,6 +587,7 @@ func (v *View) GoToLine(line int) bool {
 	line = min(max(line, 1), v.text.LineCount())
 	v.anchor = v.text.LineStart(line - 1)
 	v.caret = v.anchor
+	v.clickedBracket = bracketClick{}
 	v.goal, v.lastKind, v.reveal = -1, editOther, true
 	return true
 }
@@ -599,6 +624,7 @@ func (v *View) GoToNavigation(line, column int, wholeLine bool) bool {
 		})
 		v.anchor = v.caret
 	}
+	v.clickedBracket = bracketClick{}
 	v.goal, v.lastKind, v.reveal = -1, editOther, true
 	return true
 }
@@ -905,6 +931,7 @@ func (v *View) edit(start, end int, text string, kind editKind) {
 	v.measureEdited(firstLine, newLast, adjusted, adjustedCells)
 	v.keepStops(firstLine, oldLast, newLast, start-v.text.LineStart(firstLine))
 	v.hl.Edit(v.text, start, end, start+len(text))
+	v.shiftColors(start, end, start+len(text))
 	v.spliceRows(firstLine, oldLast, newLast, oldCount)
 	v.anchor, v.caret = start+len(text), start+len(text)
 	if cacheEdit {
@@ -1001,6 +1028,7 @@ func (v *View) restore(s snapshot) {
 	newLast := v.text.LineOf(newEnd)
 	v.keepStops(firstLine, oldLast, newLast, start-v.text.LineStart(firstLine))
 	v.hl.Edit(v.text, start, oldEnd, newEnd)
+	v.shiftColors(start, oldEnd, newEnd)
 	v.spliceRows(firstLine, oldLast, newLast, oldCount)
 	v.anchor, v.caret = s.anchor, s.caret
 	v.extra = slices.Clone(s.extra)
@@ -1069,6 +1097,7 @@ func (v *View) moveTo(offset int, extend bool) {
 // moved notes that the caret moved: it shows solid, the next paint scrolls to it, and up and
 // down aim at its new column. A vertical move puts the column it aims at back afterwards.
 func (v *View) moved() {
+	v.clickedBracket = bracketClick{}
 	v.reveal = true
 	v.blinkFrom = v.clock
 	v.goal = -1
@@ -1170,28 +1199,48 @@ func (v *View) wordRight(offset int) int {
 	return at
 }
 
-// wordAt is the word, the run of spaces or the punctuation around offset, for a double click.
+// wordAt is the word, run of spaces, or punctuation around offset.
 func (v *View) wordAt(offset int) (int, int) {
+	return v.wordRangeAt(offset, charClass)
+}
+
+// clickedWordAt selects a source-language identifier in one gesture. Text
+// grammars keep the normal word selection used by plain text.
+func (v *View) clickedWordAt(offset int) (int, int) {
+	language := v.hl.Syntax()
+	if language == nil || !strings.HasPrefix(language.Language().Scope, "source.") {
+		return v.wordAt(offset)
+	}
+	return v.wordRangeAt(offset, func(r rune) int {
+		class := charClass(r)
+		if class == 3 && syntax.IdentifierContinuation(r) {
+			return 2
+		}
+		return class
+	})
+}
+
+func (v *View) wordRangeAt(offset int, classify func(rune) int) (int, int) {
 	n := v.text.Len()
 	if n == 0 {
 		return 0, 0
 	}
 	at := offset
-	if at >= n || charClass(v.runeAt(at)) == 0 {
+	if at >= n || classify(v.runeAt(at)) == 0 {
 		if at == 0 {
 			return 0, 0
 		}
 		at = v.prevRune(at)
 	}
-	class := charClass(v.runeAt(at))
+	class := classify(v.runeAt(at))
 	if class == 0 {
 		return offset, offset
 	}
 	start, end := at, v.nextRune(at)
-	for start > 0 && charClass(v.runeAt(v.prevRune(start))) == class {
+	for start > 0 && classify(v.runeAt(v.prevRune(start))) == class {
 		start = v.prevRune(start)
 	}
-	for end < n && charClass(v.runeAt(end)) == class {
+	for end < n && classify(v.runeAt(end)) == class {
 		end = v.nextRune(end)
 	}
 	return start, end

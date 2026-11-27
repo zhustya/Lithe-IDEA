@@ -139,6 +139,33 @@ func (a *App) documentPreviewView(d *document) *editorview.View {
 	return nil
 }
 
+// syncSourcePreviewDecorations copies already prepared colors when both views still share their
+// snapshot. Independently mirrored ropes receive the worker's separately prepared answer instead.
+func (a *App) syncSourcePreviewDecorations(d *document) {
+	if preview := a.documentPreviewView(d); preview != nil {
+		preview.CopyDocumentDecorationsFrom(d.view)
+	}
+}
+
+// clearSourcePreviewDecorations withdraws a document's overlays from its editable preview too.
+func (a *App) clearSourcePreviewDecorations(d *document) {
+	a.clearSourcePreviewColors(d)
+	a.clearSourcePreviewScopes(d)
+}
+
+func (a *App) clearSourcePreviewScopes(d *document) {
+	if preview := a.documentPreviewView(d); preview != nil {
+		preview.SetBracketMatches(nil)
+		preview.SetIndentGuideScopes(editorview.PreparedIndentGuideScopes{})
+	}
+}
+
+func (a *App) clearSourcePreviewColors(d *document) {
+	if preview := a.documentPreviewView(d); preview != nil {
+		preview.ClearColorDecorations()
+	}
+}
+
 // closePreviewsOfDocument closes every editable preview that edits document d, which is going
 // away; the next frame shows the file again from what is left.
 func (a *App) closePreviewsOfDocument(d *document) {
@@ -183,11 +210,12 @@ func (a *App) showSourcePreview(p *project, sp *sourcePreview, path string, line
 	registry := a.syntaxRegistry()
 	kernel, _ := a.kernel.(editorKernel)
 	budget := int64(a.searchPreferences.MaxFileBytes)
+	bytesOf := a.documentBytesOf(p)
 	a.background(p, 0, func(ctx context.Context) func(*App) {
 		data, err := openText, error(nil)
 		if !open {
 			var read documentRead
-			read, err = readDocumentEncodedLimit(ctx, kernel, path, budget)
+			read, err = readDocumentEncodedLimit(ctx, kernel, bytesOf, path, budget)
 			data = read.text
 		}
 		var content editorview.Content
@@ -224,8 +252,9 @@ func (a *App) showEditablePreview(p *project, sp *sourcePreview, path string, li
 	generation := sp.generation
 	registry := a.syntaxRegistry()
 	kernel, _ := a.kernel.(editorKernel)
+	bytesOf := a.documentBytesOf(p)
 	a.background(p, 0, func(ctx context.Context) func(*App) {
-		file := a.readTablessFile(ctx, kernel, registry, path)
+		file := a.readTablessFile(ctx, kernel, bytesOf, registry, path)
 		return func(a *App) {
 			if sp.generation != generation || a.project != p || !alive(a) {
 				return
@@ -263,6 +292,7 @@ func (a *App) bindSourcePreview(p *project, sp *sourcePreview, d *document) {
 		view.GoToLine(sp.line)
 	}
 	sp.view, sp.doc, sp.project = view, d, p
+	a.syncSourcePreviewDecorations(d)
 	sp.applyTint()
 	sp.input = a.editablePreviewInput(p, d, view)
 	sp.draw = a.sourcePreviewDraw(sp)
@@ -282,9 +312,8 @@ func (a *App) previewEdited(p *project, sp *sourcePreview, view *editorview.View
 	}
 	if !a.editDocumentFrom(p, d, view, edit) {
 		// The preview and its document disagree on the text; the preview shows the document again.
-		p.diffs.mirroring++
 		view.ShowContent(d.view.CopyContent())
-		p.diffs.mirroring--
+		a.syncSourcePreviewDecorations(d)
 	}
 }
 
@@ -298,6 +327,7 @@ func (a *App) mirrorPreviewEdit(p *project, d *document, edit editorview.Edit) {
 		p.diffs.mirroring++
 		if !sp.view.ApplyEdit(edit, false) {
 			sp.view.ShowContent(d.view.CopyContent())
+			a.syncSourcePreviewDecorations(d)
 		}
 		p.diffs.mirroring--
 	}
@@ -433,6 +463,7 @@ func (a *App) sourcePreviewDraw(sp *sourcePreview) func(*ui.DrawContext) {
 		v.SetFont(a.editorFont())
 		v.SetWrap(false)
 		v.SetMessages(a.editorMessages())
+		v.SetPresentation(a.editorPresentation())
 		v.Paint(dc.Canvas, dc.Rect, a.editorLook())
 	}
 }

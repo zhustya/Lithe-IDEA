@@ -19,10 +19,24 @@ import (
 // decision for opens, the user is asked to trust it, to preview it in safe mode or not to open
 // it; trusting may cover every project of the parent folder. The decision is machine-local,
 // kept by Core in the toolchain catalog of the preference directory (toolchains/global.json),
-// never in the project. In safe mode the project's code is not run: models are not loaded and
-// Core refuses the plans that would run the build tool, a wrapper or a build extension
-// (plugin.build.untrustedWorkspace). A run, build, test or reload the user asks for first asks
-// to trust the project, and the notice above the editor offers it too.
+// never in the project. In safe mode the project's code is not run (#2208):
+//   - models are not loaded, and Core refuses the plans that would run the build tool, a wrapper
+//     or a build extension (plugin.build.untrustedWorkspace);
+//   - Core plans no language server, build provider process or version control provider that
+//     may run the project's code (plugin.launch.untrustedWorkspace); a language server whose
+//     plugin declares it runs none still starts;
+//   - no Git runs, since the repository's configuration can name programs Git runs: the window
+//     reads no status, and Core refuses any Git of the project's requests
+//     (git_untrusted_workspace, core.WithProjectCodeAllowed).
+//
+// A run, build, test or reload the user asks for first asks to trust the project; the notice
+// above the editor, the Git and version control windows and the language server status offer
+// it too. Trusting the project loads and starts what safe mode left out (applyProjectTrust).
+//
+// A remote workspace is trusted the same way, but its decision is Core's record for the
+// connection and the host folder (remote_trust.go, remoteconn.ReadTrust), not the catalog's for
+// its placeholder. Trusted, its Git runs on the host (remote_git.go); the features that would run
+// the host's project on this computer stay off whatever its trust.
 
 // workspaceTrustTimeout bounds reading or saving a trust decision: a Core call and a look at
 // the workspace folder.
@@ -42,7 +56,7 @@ type projectTrust struct {
 func (t *projectTrust) allowed() bool { return t.codeAllowed.Load() }
 
 // safeMode reports whether p is open without trust.
-func (p *project) safeMode() bool { return p != nil && !p.trust.allowed() }
+func (p *project) safeMode() bool { return p != nil && !p.standalone && !p.trust.allowed() }
 
 // openProjectByTrust opens the folder at root once its trust is known. A trusted folder opens at
 // once; one the user previewed in safe mode before opens in safe mode; for one with no
@@ -87,7 +101,12 @@ func (a *App) askToOpenUntrusted(trust toolchain.WorkspaceTrust) {
 	}
 	if trust.OfferedLocation != nil {
 		home, _ := os.UserHomeDir()
-		prompt.check = i18n.SharedFormat(language, "desktop.trust.location", map[string]string{"folder": trustFolderLabel(*trust.OfferedLocation, home)})
+		folder := *trust.OfferedLocation
+		short := trustFolderLabel(folder, home)
+		prompt.check = i18n.SharedFormat(language, "desktop.trust.location", map[string]string{"folder": short})
+		if short != welcomeShorten(filepath.FromSlash(folder), home) {
+			prompt.checkFull = i18n.SharedFormat(language, "desktop.trust.location", map[string]string{"folder": filepath.FromSlash(folder)})
+		}
 	}
 	prompt.onAnswer = func(choice *int) {
 		if choice == nil || *choice == 0 {
@@ -160,7 +179,7 @@ func (a *App) requireProjectTrust(p *project, proceed func()) {
 // askToTrustProject asks to trust the open project p in safe mode, from the notice above the
 // editor or before an action that runs project code; then, when set, it runs proceed.
 func (a *App) askToTrustProject(p *project, proceed func()) {
-	if p.trust.asking {
+	if p.trust.asking || a.remoteTrustUnreachable(p) {
 		return
 	}
 	p.trust.asking = true
@@ -185,6 +204,10 @@ func (a *App) askToTrustProject(p *project, proceed func()) {
 // trustOpenProject saves the trust of the open project p, read again so the decision is saved
 // against the catalog as it is now, and leaves safe mode.
 func (a *App) trustOpenProject(p *project, proceed func()) {
+	if p.remote != nil {
+		a.trustRemoteProject(p, proceed)
+		return
+	}
 	kernel, globalRoot, root := a.kernel, a.globalToolchainRoot(), p.root
 	a.background(p, workspaceTrustTimeout, func(ctx context.Context) func(*App) {
 		trust, err := toolchain.ReadWorkspaceTrust(ctx, kernel, globalRoot, root)
@@ -210,6 +233,10 @@ func (a *App) trustOpenProject(p *project, proceed func()) {
 // reloadProjectTrust reads the trust of the open project again, after the settings window
 // changed it, and applies it.
 func (a *App) reloadProjectTrust(p *project) {
+	if p != nil && p.remote != nil {
+		a.reloadRemoteTrust(p)
+		return
+	}
 	if p == nil || a.trustEveryWorkspace {
 		return
 	}
@@ -229,14 +256,30 @@ func (a *App) reloadProjectTrust(p *project) {
 }
 
 // applyProjectTrust makes trusted the trust of p. Leaving safe mode loads what safe mode left
-// out: the models, and through them the run configurations of the title bar, and the language
-// servers that failed for want of the workspace's tools.
+// out: Git and the version control provider, the models, and through them the run
+// configurations of the title bar, and the language servers Core planned none for or that
+// failed for want of the workspace's tools. Entering it again stops Git at once, both the status
+// and the watch of the repository's metadata; the language servers already running keep running
+// until the project closes.
 func (a *App) applyProjectTrust(p *project, trusted bool) {
 	was := p.trust.allowed()
 	p.trust.codeAllowed.Store(trusted)
-	if !trusted || was {
+	if trusted == was {
 		return
 	}
+	if !trusted {
+		a.closeGitObservation(p)
+		a.loadGit(p)
+		return
+	}
+	a.loadGit(p)
+	a.startGitObservation(p)
+	if p.remote != nil {
+		// A remote workspace's Git runs on its host; its build tools and language servers do not
+		// run yet, so trusting it starts nothing else.
+		return
+	}
+	p.vcs.clearFailures()
 	for index := range p.build.instances {
 		instance := &p.build.instances[index]
 		if instance.modelUntrusted {
@@ -254,8 +297,30 @@ func (a *App) skipUntrustedModel(instance *buildInstance) {
 	instance.modelError = i18n.Shared(a.language(), "desktop.trust.modelSafeMode")
 }
 
+// safeModePanel declares what a tool window shows in safe mode in place of what it would read by
+// running project code: message, and the button that asks to trust the project.
+func (a *App) safeModePanel(c ui.C, p *project, message string) {
+	ui.Column(c).Fill().Center().Gap(8).PadX(shellContentPad).Children(func() {
+		ui.Paragraph(c, message, 3).FillWidth().TextCenter().Color(a.colors.Subtle)
+		if ui.Button(c.Key("trust"), i18n.Shared(a.language(), "desktop.trust.bannerLink")).Ghost().Disabled(p.trust.asking).Clicked() {
+			c.After(func() { a.askToTrustProject(p, nil) })
+		}
+	})
+}
+
+// remoteLocalOnlyPanel declares what a tool window that reads or runs the project on this
+// computer shows in a remote workspace: that it does not work there yet. Trust does not change
+// it, so it has no button.
+func (a *App) remoteLocalOnlyPanel(c ui.C) {
+	ui.Column(c).Fill().Center().PadX(shellContentPad).Children(func() {
+		ui.Paragraph(c, i18n.Shared(a.language(), "desktop.remote.workspace.localOnly"), 3).FillWidth().TextCenter().Color(a.colors.Subtle)
+	})
+}
+
 // safeModeNotice declares the notice above the editor of a project in safe mode, with the link
-// that asks to trust it, as IDEA's editor notification does.
+// that asks to trust it, as IDEA's editor notification does. A remote workspace's notice also
+// stands over its empty editor: in safe mode it says so, with the link, and trusted it says what
+// works in a remote workspace, with none.
 func (a *App) safeModeNotice(c ui.C, p *project) {
 	background, border, foreground := gfx.RGB24(0xFFF6E9), gfx.RGB24(0xF4CD9A), gfx.RGB24(0x000000)
 	if a.colors.Dark {
@@ -266,8 +331,15 @@ func (a *App) safeModeNotice(c ui.C, p *project) {
 		ui.Row(c.Part("top")).FillWidth().Height(1).Shrink(0).Background(border)
 		ui.Row(c).FillWidth().Gap(conflictGap).PadX(conflictPadX).PadY(conflictPadY).Items(ui.Center).Children(func() {
 			ui.Icon(c, icons.BannerWarning).Size(conflictIcon, conflictIcon).Shrink(0).Color(gfx.RGB24(0xFFFFFF))
-			ui.Paragraph(c, i18n.Shared(language, "desktop.trust.banner"), conflictMaxRows).FontSize(13).Color(foreground).Grow(1).Shrink(1)
-			if ui.Button(c.Key("trust"), i18n.Shared(language, "desktop.trust.bannerLink")).Link().Disabled(p.trust.asking).Clicked() {
+			text, link := i18n.Shared(language, "desktop.trust.banner"), true
+			switch {
+			case p.remote != nil && p.safeMode():
+				text = i18n.Shared(language, "desktop.remote.workspace.safeBanner")
+			case p.remote != nil:
+				text, link = i18n.Shared(language, "desktop.remote.workspace.banner"), false
+			}
+			ui.Paragraph(c, text, conflictMaxRows).FontSize(13).Color(foreground).Grow(1).Shrink(1)
+			if link && ui.Button(c.Key("trust"), i18n.Shared(language, "desktop.trust.bannerLink")).Link().Disabled(p.trust.asking).Clicked() {
 				c.After(func() { a.askToTrustProject(p, nil) })
 			}
 		})
